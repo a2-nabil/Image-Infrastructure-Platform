@@ -25,6 +25,7 @@ out/
 *.tsbuildinfo
 
 # IDE / OS
+.cursor/
 .idea/
 .vscode/
 *.swp
