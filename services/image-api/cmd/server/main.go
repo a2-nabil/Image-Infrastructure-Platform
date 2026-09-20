@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -10,8 +11,11 @@ import (
 
 	"image-infrastructure-platform/services/image-api/internal/config"
 	"image-infrastructure-platform/services/image-api/internal/database"
+	"image-infrastructure-platform/services/image-api/internal/handler"
 	"image-infrastructure-platform/services/image-api/internal/logger"
 	"image-infrastructure-platform/services/image-api/internal/middleware"
+	"image-infrastructure-platform/services/image-api/internal/service"
+	"image-infrastructure-platform/services/image-api/internal/storage"
 )
 
 func main() {
@@ -22,14 +26,31 @@ func main() {
 	}
 
 	slogLogger := logger.New(cfg.Server.AppEnv, cfg.Logging.Level)
+	dbURL := buildDatabaseURL(cfg.Database)
 
 	if cfg.Server.AppEnv == "development" {
 		migrationsPath := resolveMigrationsPath()
-		if err := database.RunMigrations(buildDatabaseURL(cfg.Database), migrationsPath); err != nil {
+		if err := database.RunMigrations(dbURL, migrationsPath); err != nil {
 			slogLogger.Error("database migrations failed", "error", err)
 			os.Exit(1)
 		}
 	}
+
+	db, err := database.Open(dbURL)
+	if err != nil {
+		slogLogger.Error("database connection failed", "error", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	s3Client, err := storage.NewS3Client(context.Background(), cfg)
+	if err != nil {
+		slogLogger.Error("s3 client initialization failed", "error", err)
+		os.Exit(1)
+	}
+
+	imageService := service.NewImageService(db, s3Client)
+	imageHandler := handler.NewImageHandler(imageService)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
@@ -37,8 +58,9 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("POST /api/v1/images", imageHandler.UploadHandler)
 
-	handler := middleware.RequestIDMiddleware(mux)
+	root := middleware.RequestIDMiddleware(mux)
 
 	slogLogger.Info("image-api starting",
 		"env", cfg.Server.AppEnv,
@@ -46,7 +68,7 @@ func main() {
 	)
 
 	addr := ":" + cfg.Server.Port
-	if err := http.ListenAndServe(addr, handler); err != nil {
+	if err := http.ListenAndServe(addr, root); err != nil {
 		slogLogger.Error("server stopped", "error", err)
 		os.Exit(1)
 	}
