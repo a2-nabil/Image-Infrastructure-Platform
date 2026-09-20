@@ -109,3 +109,21 @@ func (c *S3Client) ObjectURL(key string) string {
 	}
 	return fmt.Sprintf("https://%s.s3.%s.amazonaws.com/%s", c.bucket, c.region, key)
 }
+
+// Ready verifies the S3 client can reach the configured bucket.
+func (c *S3Client) Ready(ctx context.Context) error {
+	if c == nil || c.client == nil {
+		return fmt.Errorf("s3 client is not initialized")
+	}
+	if c.bucket == "" {
+		return fmt.Errorf("s3 bucket is not configured")
+	}
+
+	_, err := c.client.HeadBucket(ctx, &s3.HeadBucketInput{
+		Bucket: aws.String(c.bucket),
+	})
+	if err != nil {
+		return fmt.Errorf("head bucket %q: %w", c.bucket, err)
+	}
+	return nil
+}

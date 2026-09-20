@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -44,24 +46,27 @@ func main() {
 		slogLogger.Error("database connection failed", "error", err)
 		os.Exit(1)
 	}
-	defer db.Close()
 
 	redisOpts, err := redis.ParseURL(cfg.RedisAddr())
 	if err != nil {
 		slogLogger.Error("invalid redis url", "error", err)
+		_ = db.Close()
 		os.Exit(1)
 	}
 	rdb := redis.NewClient(redisOpts)
-	defer rdb.Close()
 
 	if err := middleware.PingRedis(context.Background(), rdb); err != nil {
 		slogLogger.Error("redis connection failed", "error", err)
+		_ = rdb.Close()
+		_ = db.Close()
 		os.Exit(1)
 	}
 
 	s3Client, err := storage.NewS3Client(context.Background(), cfg)
 	if err != nil {
 		slogLogger.Error("s3 client initialization failed", "error", err)
+		_ = rdb.Close()
+		_ = db.Close()
 		os.Exit(1)
 	}
 
@@ -72,25 +77,58 @@ func main() {
 	variantLimiter := middleware.RateLimitMiddleware(rdb, 60, time.Minute, "variants")
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-	})
+	mux.HandleFunc("GET /healthz", handler.HealthzHandler)
+	mux.HandleFunc("GET /readyz", handler.ReadyzHandler(db, rdb, s3Client))
 	mux.Handle("POST /api/v1/images", uploadLimiter(http.HandlerFunc(imageHandler.UploadHandler)))
 	mux.Handle("GET /api/v1/images/{id}/variants/{preset}", variantLimiter(http.HandlerFunc(imageHandler.GetVariantHandler)))
 
 	root := middleware.CORSMiddleware(middleware.RequestIDMiddleware(mux))
 
-	slogLogger.Info("image-api starting",
-		"env", cfg.Server.AppEnv,
-		"port", cfg.Server.Port,
-	)
+	srv := &http.Server{
+		Addr:              ":" + cfg.Server.Port,
+		Handler:           root,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 
-	addr := ":" + cfg.Server.Port
-	if err := http.ListenAndServe(addr, root); err != nil {
-		slogLogger.Error("server stopped", "error", err)
-		os.Exit(1)
+	errCh := make(chan error, 1)
+	go func() {
+		slogLogger.Info("image-api starting",
+			"env", cfg.Server.AppEnv,
+			"port", cfg.Server.Port,
+		)
+		errCh <- srv.ListenAndServe()
+	}()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+
+	select {
+	case err := <-errCh:
+		if err != nil && err != http.ErrServerClosed {
+			slogLogger.Error("server stopped", "error", err)
+			_ = rdb.Close()
+			_ = db.Close()
+			os.Exit(1)
+		}
+	case sig := <-sigCh:
+		slog.Info("server shutting down...", "signal", sig.String())
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slogLogger.Error("graceful shutdown failed", "error", err)
+		}
+
+		if err := rdb.Close(); err != nil {
+			slogLogger.Error("redis close failed", "error", err)
+		}
+		if err := db.Close(); err != nil {
+			slogLogger.Error("database close failed", "error", err)
+		}
+
+		slog.Info("server exited gracefully")
 	}
 }
 
