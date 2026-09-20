@@ -24,13 +24,25 @@ type uploadSuccessResponse struct {
 }
 
 type uploadSuccessData struct {
-	ID          string `json:"id"`
-	Fingerprint string `json:"fingerprint"`
-	OriginalURL string `json:"original_url"`
-	Width       int    `json:"width"`
-	Height      int    `json:"height"`
-	Format      string `json:"format"`
-	SizeBytes   int64  `json:"size_bytes"`
+	ID          string              `json:"id"`
+	Fingerprint string              `json:"fingerprint"`
+	OriginalURL string              `json:"original_url"`
+	Width       int                 `json:"width"`
+	Height      int                 `json:"height"`
+	Format      string              `json:"format"`
+	SizeBytes   int64               `json:"size_bytes"`
+	Status      string              `json:"status"`
+	Variants    []uploadVariantData `json:"variants"`
+}
+
+type uploadVariantData struct {
+	ID        string `json:"id"`
+	Preset    string `json:"preset_name"`
+	URL       string `json:"url"`
+	Width     int    `json:"width"`
+	Height    int    `json:"height"`
+	SizeBytes int64  `json:"size_bytes"`
+	MimeType  string `json:"mime_type"`
 }
 
 type uploadErrorResponse struct {
@@ -56,11 +68,25 @@ func (h *ImageHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	img, err := h.images.ProcessAndUpload(r.Context(), header)
+	result, err := h.images.ProcessAndUpload(r.Context(), header)
 	if err != nil {
 		status, code := mapUploadError(err)
 		writeError(w, status, code, err.Error())
 		return
+	}
+
+	img := result.Image
+	variants := make([]uploadVariantData, 0, len(result.Variants))
+	for _, variant := range result.Variants {
+		variants = append(variants, uploadVariantData{
+			ID:        variant.ID,
+			Preset:    variant.PresetName,
+			URL:       h.images.VariantURL(variant),
+			Width:     variant.Width,
+			Height:    variant.Height,
+			SizeBytes: variant.FileSizeBytes,
+			MimeType:  variant.MimeType,
+		})
 	}
 
 	writeJSON(w, http.StatusCreated, uploadSuccessResponse{
@@ -73,6 +99,8 @@ func (h *ImageHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 			Height:      intOrZero(img.Height),
 			Format:      formatFromMIME(img.MimeType),
 			SizeBytes:   img.FileSizeBytes,
+			Status:      img.Status,
+			Variants:    variants,
 		},
 	})
 }
@@ -86,6 +114,8 @@ func mapUploadError(err error) (int, string) {
 		return http.StatusUnsupportedMediaType, "UNSUPPORTED_MEDIA_TYPE"
 	case strings.Contains(msg, "empty file"), strings.Contains(msg, "file is required"):
 		return http.StatusBadRequest, "INVALID_IMAGE"
+	case strings.Contains(msg, "generate variants"), strings.Contains(msg, "decode image"):
+		return http.StatusUnprocessableEntity, "VARIANT_GENERATION_FAILED"
 	default:
 		return http.StatusInternalServerError, "UPLOAD_FAILED"
 	}

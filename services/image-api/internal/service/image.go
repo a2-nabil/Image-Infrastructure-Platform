@@ -29,6 +29,12 @@ var allowedMIMETypes = map[string]struct{}{
 	"image/webp": {},
 }
 
+// UploadResult is the outcome of ProcessAndUpload including generated variants.
+type UploadResult struct {
+	Image    *model.Image
+	Variants []*model.ImageVariant
+}
+
 // ImageService handles upload validation, S3 ingestion, and persistence.
 type ImageService struct {
 	db *sql.DB
@@ -40,9 +46,9 @@ func NewImageService(db *sql.DB, s3Client *storage.S3Client) *ImageService {
 	return &ImageService{db: db, s3: s3Client}
 }
 
-// ProcessAndUpload validates the multipart image, uploads it to S3, and
-// persists an images row with status uploaded.
-func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipart.FileHeader) (*model.Image, error) {
+// ProcessAndUpload validates the multipart image, uploads it to S3, generates
+// variants, persists metadata, and marks the image ready.
+func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipart.FileHeader) (*UploadResult, error) {
 	if s == nil || s.db == nil || s.s3 == nil {
 		return nil, fmt.Errorf("image service is not initialized")
 	}
@@ -105,7 +111,7 @@ func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipa
 		FileSizeBytes:    int64(len(payload)),
 		Width:            width,
 		Height:           height,
-		Status:           model.ImageStatusUploaded,
+		Status:           model.ImageStatusProcessing,
 	}
 
 	const insertSQL = `
@@ -132,7 +138,60 @@ func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipa
 		return nil, fmt.Errorf("persist image metadata: %w", err)
 	}
 
-	return img, nil
+	variants, err := s.GenerateVariants(ctx, img.ID, bytes.NewReader(payload))
+	if err != nil {
+		_ = s.updateImageStatus(ctx, img.ID, model.ImageStatusFailed)
+		return nil, fmt.Errorf("generate variants: %w", err)
+	}
+
+	if err := s.persistVariants(ctx, variants); err != nil {
+		_ = s.updateImageStatus(ctx, img.ID, model.ImageStatusFailed)
+		return nil, fmt.Errorf("persist variants: %w", err)
+	}
+
+	if err := s.updateImageStatus(ctx, img.ID, model.ImageStatusReady); err != nil {
+		return nil, fmt.Errorf("mark image ready: %w", err)
+	}
+	img.Status = model.ImageStatusReady
+
+	return &UploadResult{Image: img, Variants: variants}, nil
+}
+
+func (s *ImageService) persistVariants(ctx context.Context, variants []*model.ImageVariant) error {
+	const insertSQL = `
+		INSERT INTO image_variants (
+			image_id, preset_name, storage_path, mime_type,
+			file_size_bytes, width, height
+		) VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING id, created_at
+	`
+
+	for _, variant := range variants {
+		if err := s.db.QueryRowContext(
+			ctx,
+			insertSQL,
+			variant.ImageID,
+			variant.PresetName,
+			variant.StoragePath,
+			variant.MimeType,
+			variant.FileSizeBytes,
+			variant.Width,
+			variant.Height,
+		).Scan(&variant.ID, &variant.CreatedAt); err != nil {
+			return fmt.Errorf("insert variant %q: %w", variant.PresetName, err)
+		}
+	}
+	return nil
+}
+
+func (s *ImageService) updateImageStatus(ctx context.Context, imageID, status string) error {
+	const updateSQL = `
+		UPDATE images
+		SET status = $2, updated_at = NOW()
+		WHERE id = $1
+	`
+	_, err := s.db.ExecContext(ctx, updateSQL, imageID, status)
+	return err
 }
 
 // ObjectURL builds the S3 object URL for a stored image.
@@ -141,6 +200,14 @@ func (s *ImageService) ObjectURL(img *model.Image) string {
 		return ""
 	}
 	return s.s3.ObjectURL(img.StoragePath)
+}
+
+// VariantURL builds the S3 object URL for a variant.
+func (s *ImageService) VariantURL(variant *model.ImageVariant) string {
+	if variant == nil || s == nil || s.s3 == nil {
+		return ""
+	}
+	return s.s3.ObjectURL(variant.StoragePath)
 }
 
 func decodeDimensions(payload []byte) (*int, *int) {
