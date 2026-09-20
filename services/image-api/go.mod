@@ -11,6 +11,7 @@ require (
 	github.com/disintegration/imaging v1.6.2
 	github.com/golang-migrate/migrate/v4 v4.20.1
 	github.com/lib/pq v1.12.3
+	github.com/redis/go-redis/v9 v9.22.0
 	golang.org/x/image v0.46.0
 )
 
@@ -29,4 +30,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.0 // indirect
 	github.com/aws/smithy-go v1.28.1 // indirect
+	github.com/cespare/xxhash/v2 v2.3.0 // indirect
+	go.uber.org/atomic v1.11.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 )

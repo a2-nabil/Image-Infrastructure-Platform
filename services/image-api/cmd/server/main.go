@@ -8,6 +8,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"time"
+
+	"github.com/redis/go-redis/v9"
 
 	"image-infrastructure-platform/services/image-api/internal/config"
 	"image-infrastructure-platform/services/image-api/internal/database"
@@ -43,6 +46,19 @@ func main() {
 	}
 	defer db.Close()
 
+	redisOpts, err := redis.ParseURL(cfg.RedisAddr())
+	if err != nil {
+		slogLogger.Error("invalid redis url", "error", err)
+		os.Exit(1)
+	}
+	rdb := redis.NewClient(redisOpts)
+	defer rdb.Close()
+
+	if err := middleware.PingRedis(context.Background(), rdb); err != nil {
+		slogLogger.Error("redis connection failed", "error", err)
+		os.Exit(1)
+	}
+
 	s3Client, err := storage.NewS3Client(context.Background(), cfg)
 	if err != nil {
 		slogLogger.Error("s3 client initialization failed", "error", err)
@@ -52,14 +68,17 @@ func main() {
 	imageService := service.NewImageService(db, s3Client)
 	imageHandler := handler.NewImageHandler(imageService)
 
+	uploadLimiter := middleware.RateLimitMiddleware(rdb, 10, time.Minute, "upload")
+	variantLimiter := middleware.RateLimitMiddleware(rdb, 60, time.Minute, "variants")
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
-	mux.HandleFunc("POST /api/v1/images", imageHandler.UploadHandler)
-	mux.HandleFunc("GET /api/v1/images/{id}/variants/{preset}", imageHandler.GetVariantHandler)
+	mux.Handle("POST /api/v1/images", uploadLimiter(http.HandlerFunc(imageHandler.UploadHandler)))
+	mux.Handle("GET /api/v1/images/{id}/variants/{preset}", variantLimiter(http.HandlerFunc(imageHandler.GetVariantHandler)))
 
 	root := middleware.CORSMiddleware(middleware.RequestIDMiddleware(mux))
 

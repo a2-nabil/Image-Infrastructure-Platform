@@ -32,7 +32,9 @@ type DatabaseConfig struct {
 }
 
 type RedisConfig struct {
-	URL string
+	URL  string
+	Host string
+	Port string
 }
 
 type AWSConfig struct {
@@ -78,7 +80,9 @@ func Load() (*Config, error) {
 			SSLMode:  getenvDefault("POSTGRES_SSLMODE", "disable"),
 		},
 		Redis: RedisConfig{
-			URL: os.Getenv("REDIS_URL"),
+			URL:  os.Getenv("REDIS_URL"),
+			Host: getenvDefault("REDIS_HOST", "localhost"),
+			Port: getenvDefault("REDIS_PORT", "6379"),
 		},
 		AWS: AWSConfig{
 			Region:          os.Getenv("AWS_REGION"),
@@ -96,6 +100,26 @@ func Load() (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// RedisAddr returns a redis connection URL, preferring REDIS_URL and falling
+// back to redis://{REDIS_HOST}:{REDIS_PORT}/0.
+func (c *Config) RedisAddr() string {
+	if c == nil {
+		return "redis://localhost:6379/0"
+	}
+	if c.Redis.URL != "" {
+		return c.Redis.URL
+	}
+	host := c.Redis.Host
+	if host == "" {
+		host = "localhost"
+	}
+	port := c.Redis.Port
+	if port == "" {
+		port = "6379"
+	}
+	return fmt.Sprintf("redis://%s:%s/0", host, port)
 }
 
 func (c *Config) validate() error {
