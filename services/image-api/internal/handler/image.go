@@ -2,6 +2,8 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"strings"
 
@@ -82,7 +84,7 @@ func (h *ImageHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		variants = append(variants, uploadVariantData{
 			ID:        variant.ID,
 			Preset:    variant.PresetName,
-			URL:       h.images.VariantURL(variant),
+			URL:       absoluteURL(r, h.images.VariantProxyPath(img.ID, variant.PresetName)),
 			Width:     variant.Width,
 			Height:    variant.Height,
 			SizeBytes: variant.FileSizeBytes,
@@ -110,6 +112,54 @@ func (h *ImageHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 			Variants:     variants,
 		},
 	})
+}
+
+// GetVariantHandler streams a stored variant from S3 via the API.
+func (h *ImageHandler) GetVariantHandler(w http.ResponseWriter, r *http.Request) {
+	imageID := r.PathValue("id")
+	preset := r.PathValue("preset")
+	if imageID == "" || preset == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_PATH", "image id and preset are required")
+		return
+	}
+
+	variant, err := h.images.FindVariantByPreset(r.Context(), imageID, preset)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "VARIANT_LOOKUP_FAILED", err.Error())
+		return
+	}
+	if variant == nil {
+		writeError(w, http.StatusNotFound, "VARIANT_NOT_FOUND", "variant not found")
+		return
+	}
+
+	body, contentType, err := h.images.OpenVariantObject(r.Context(), variant)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "VARIANT_FETCH_FAILED", err.Error())
+		return
+	}
+	defer body.Close()
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", preset+".jpg"))
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, body)
+}
+
+func absoluteURL(r *http.Request, path string) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		scheme = proto
+	}
+	host := r.Host
+	if host == "" {
+		host = "localhost:8080"
+	}
+	return fmt.Sprintf("%s://%s%s", scheme, host, path)
 }
 
 func mapUploadError(err error) (int, string) {

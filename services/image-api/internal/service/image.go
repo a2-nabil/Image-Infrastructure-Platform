@@ -289,12 +289,61 @@ func (s *ImageService) ObjectURL(img *model.Image) string {
 	return s.s3.ObjectURL(img.StoragePath)
 }
 
-// VariantURL builds the S3 object URL for a variant.
-func (s *ImageService) VariantURL(variant *model.ImageVariant) string {
-	if variant == nil || s == nil || s.s3 == nil {
-		return ""
+// VariantProxyPath returns the API path that streams a variant without public S3 access.
+func (s *ImageService) VariantProxyPath(imageID, presetName string) string {
+	return fmt.Sprintf("/api/v1/images/%s/variants/%s", imageID, presetName)
+}
+
+// FindVariantByPreset loads a variant row by image id and preset name.
+func (s *ImageService) FindVariantByPreset(ctx context.Context, imageID, presetName string) (*model.ImageVariant, error) {
+	const query = `
+		SELECT id, image_id, preset_name, storage_path, mime_type,
+		       file_size_bytes, width, height, created_at
+		FROM image_variants
+		WHERE image_id = $1 AND preset_name = $2
+		LIMIT 1
+	`
+
+	variant := &model.ImageVariant{}
+	err := s.db.QueryRowContext(ctx, query, imageID, presetName).Scan(
+		&variant.ID,
+		&variant.ImageID,
+		&variant.PresetName,
+		&variant.StoragePath,
+		&variant.MimeType,
+		&variant.FileSizeBytes,
+		&variant.Width,
+		&variant.Height,
+		&variant.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
 	}
-	return s.s3.ObjectURL(variant.StoragePath)
+	if err != nil {
+		return nil, err
+	}
+	return variant, nil
+}
+
+// OpenVariantObject streams a variant object from S3.
+func (s *ImageService) OpenVariantObject(ctx context.Context, variant *model.ImageVariant) (io.ReadCloser, string, error) {
+	if s == nil || s.s3 == nil {
+		return nil, "", fmt.Errorf("image service is not initialized")
+	}
+	if variant == nil || variant.StoragePath == "" {
+		return nil, "", fmt.Errorf("variant storage path is required")
+	}
+
+	body, contentType, err := s.s3.GetObject(ctx, variant.StoragePath)
+	if err != nil {
+		return nil, "", err
+	}
+	if contentType == "" || contentType == "application/octet-stream" {
+		if variant.MimeType != "" {
+			contentType = variant.MimeType
+		}
+	}
+	return body, contentType, nil
 }
 
 func decodeDimensions(payload []byte) (*int, *int) {

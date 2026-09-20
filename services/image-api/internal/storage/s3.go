@@ -74,6 +74,34 @@ func (c *S3Client) UploadImage(ctx context.Context, key string, body io.Reader, 
 	return c.ObjectURL(key), nil
 }
 
+// GetObject retrieves an S3 object body and its content type.
+func (c *S3Client) GetObject(ctx context.Context, key string) (io.ReadCloser, string, error) {
+	if c == nil || c.client == nil {
+		return nil, "", fmt.Errorf("s3 client is not initialized")
+	}
+	if key == "" {
+		return nil, "", fmt.Errorf("object key is required")
+	}
+	if c.bucket == "" {
+		return nil, "", fmt.Errorf("s3 bucket is not configured")
+	}
+
+	out, err := c.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("get object %q: %w", key, err)
+	}
+
+	contentType := "application/octet-stream"
+	if out.ContentType != nil && *out.ContentType != "" {
+		contentType = *out.ContentType
+	}
+
+	return out.Body, contentType, nil
+}
+
 // ObjectURL returns the HTTPS object URL for a key in the configured bucket.
 func (c *S3Client) ObjectURL(key string) string {
 	if c == nil {

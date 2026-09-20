@@ -5,7 +5,11 @@ import { Loader, Upload } from "lucide-react";
 import ResultDisplay, {
   type IdentifyResult,
 } from "@/components/ResultDisplay";
-import { uploadImageToBackend } from "@/lib/image-api";
+import {
+  formatBytes,
+  uploadImage,
+  type ImageUploadData,
+} from "@/lib/image-api";
 
 type IdentifyApiResponse =
   | { success: true; data: IdentifyResult }
@@ -15,6 +19,7 @@ export default function Home() {
   const [preview, setPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<IdentifyResult | null>(null);
+  const [uploadData, setUploadData] = useState<ImageUploadData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [backendNote, setBackendNote] = useState<string | null>(null);
 
@@ -33,6 +38,7 @@ export default function Home() {
       setLoading(true);
       setError(null);
       setResult(null);
+      setUploadData(null);
       setBackendNote(null);
 
       if (file.size > 4 * 1024 * 1024) {
@@ -44,11 +50,13 @@ export default function Home() {
         throw new Error("Please upload a valid image file (JPEG, PNG, or WebP)");
       }
 
-      const uploadResult = await uploadImageToBackend(file);
+      const uploadResult = await uploadImage(file);
       if (uploadResult.mocked) {
         setBackendNote(
           "Go Image API unavailable — continuing with local identify flow.",
         );
+      } else if (uploadResult.success) {
+        setUploadData(uploadResult.data);
       }
 
       const formData = new FormData();
@@ -79,6 +87,8 @@ export default function Home() {
       setLoading(false);
     }
   };
+
+  const variants = uploadData?.variants ?? [];
 
   return (
     <main className="container mx-auto px-4 py-8 max-w-4xl">
@@ -152,6 +162,14 @@ export default function Home() {
         </div>
       )}
 
+      {uploadData?.deduplicated && !loading && (
+        <div className="mb-8">
+          <span className="inline-flex items-center rounded-full bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 border border-emerald-200">
+            ⚡ Instant Deduplication Hit
+          </span>
+        </div>
+      )}
+
       {error && (
         <div className="bg-red-50 border border-red-200 text-red-600 p-4 rounded-lg mb-8">
           <p className="font-medium">Error</p>
@@ -159,7 +177,54 @@ export default function Home() {
         </div>
       )}
 
-      {result && !loading && <ResultDisplay result={result} />}
+      {variants.length > 0 && !loading && (
+        <div className="bg-white rounded-xl shadow-lg p-6 mb-8 animate-fade-in">
+          <h2 className="text-2xl font-semibold mb-6 text-gray-800">
+            Image Variants
+          </h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+            {variants.map((variant) => (
+              <div
+                key={variant.id || variant.preset_name}
+                className="border border-gray-200 rounded-lg p-4 flex flex-col"
+              >
+                <div className="mb-3 bg-gray-50 rounded-md overflow-hidden flex items-center justify-center min-h-32">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={variant.url}
+                    alt={`${variant.preset_name} variant`}
+                    className="max-h-40 w-full object-contain"
+                  />
+                </div>
+                <p className="text-sm font-semibold text-gray-900 capitalize mb-1">
+                  {variant.preset_name}
+                </p>
+                <p className="text-xs text-gray-500 mb-1">
+                  {variant.width} x {variant.height}
+                </p>
+                <p className="text-xs text-gray-500 mb-4">
+                  {formatBytes(variant.size_bytes)}
+                </p>
+                <a
+                  href={variant.url}
+                  download={`${variant.preset_name}.jpg`}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="mt-auto inline-flex justify-center items-center rounded-md bg-blue-500 px-3 py-2 text-sm font-medium text-white hover:bg-blue-600 transition"
+                >
+                  Download
+                </a>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {result && !loading && (
+        <div className="mb-8">
+          <ResultDisplay result={result} />
+        </div>
+      )}
     </main>
   );
 }

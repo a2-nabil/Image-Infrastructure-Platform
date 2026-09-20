@@ -59,8 +59,9 @@ func main() {
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("POST /api/v1/images", imageHandler.UploadHandler)
+	mux.HandleFunc("GET /api/v1/images/{id}/variants/{preset}", imageHandler.GetVariantHandler)
 
-	root := middleware.RequestIDMiddleware(mux)
+	root := middleware.CORSMiddleware(middleware.RequestIDMiddleware(mux))
 
 	slogLogger.Info("image-api starting",
 		"env", cfg.Server.AppEnv,
