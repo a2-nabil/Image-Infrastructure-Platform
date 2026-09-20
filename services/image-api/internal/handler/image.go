@@ -24,15 +24,16 @@ type uploadSuccessResponse struct {
 }
 
 type uploadSuccessData struct {
-	ID          string              `json:"id"`
-	Fingerprint string              `json:"fingerprint"`
-	OriginalURL string              `json:"original_url"`
-	Width       int                 `json:"width"`
-	Height      int                 `json:"height"`
-	Format      string              `json:"format"`
-	SizeBytes   int64               `json:"size_bytes"`
-	Status      string              `json:"status"`
-	Variants    []uploadVariantData `json:"variants"`
+	ID           string              `json:"id"`
+	Fingerprint  string              `json:"fingerprint"`
+	OriginalURL  string              `json:"original_url"`
+	Width        int                 `json:"width"`
+	Height       int                 `json:"height"`
+	Format       string              `json:"format"`
+	SizeBytes    int64               `json:"size_bytes"`
+	Status       string              `json:"status"`
+	Deduplicated bool                `json:"deduplicated,omitempty"`
+	Variants     []uploadVariantData `json:"variants"`
 }
 
 type uploadVariantData struct {
@@ -89,18 +90,24 @@ func (h *ImageHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	writeJSON(w, http.StatusCreated, uploadSuccessResponse{
+	statusCode := http.StatusCreated
+	if result.Deduplicated {
+		statusCode = http.StatusOK
+	}
+
+	writeJSON(w, statusCode, uploadSuccessResponse{
 		Success: true,
 		Data: uploadSuccessData{
-			ID:          img.ID,
-			Fingerprint: img.Fingerprint,
-			OriginalURL: h.images.ObjectURL(img),
-			Width:       intOrZero(img.Width),
-			Height:      intOrZero(img.Height),
-			Format:      formatFromMIME(img.MimeType),
-			SizeBytes:   img.FileSizeBytes,
-			Status:      img.Status,
-			Variants:    variants,
+			ID:           img.ID,
+			Fingerprint:  img.Fingerprint,
+			OriginalURL:  h.images.ObjectURL(img),
+			Width:        intOrZero(img.Width),
+			Height:       intOrZero(img.Height),
+			Format:       formatFromMIME(img.MimeType),
+			SizeBytes:    img.FileSizeBytes,
+			Status:       img.Status,
+			Deduplicated: result.Deduplicated,
+			Variants:     variants,
 		},
 	})
 }

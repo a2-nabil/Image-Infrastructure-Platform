@@ -31,8 +31,9 @@ var allowedMIMETypes = map[string]struct{}{
 
 // UploadResult is the outcome of ProcessAndUpload including generated variants.
 type UploadResult struct {
-	Image    *model.Image
-	Variants []*model.ImageVariant
+	Image        *model.Image
+	Variants     []*model.ImageVariant
+	Deduplicated bool
 }
 
 // ImageService handles upload validation, S3 ingestion, and persistence.
@@ -88,6 +89,22 @@ func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipa
 
 	sum := sha256.Sum256(payload)
 	fingerprint := hex.EncodeToString(sum[:])
+
+	existing, err := s.findReadyByFingerprint(ctx, fingerprint)
+	if err != nil {
+		return nil, fmt.Errorf("lookup fingerprint: %w", err)
+	}
+	if existing != nil {
+		variants, err := s.listVariants(ctx, existing.ID)
+		if err != nil {
+			return nil, fmt.Errorf("load existing variants: %w", err)
+		}
+		return &UploadResult{
+			Image:        existing,
+			Variants:     variants,
+			Deduplicated: true,
+		}, nil
+	}
 
 	objectID, err := newUUID()
 	if err != nil {
@@ -154,7 +171,77 @@ func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipa
 	}
 	img.Status = model.ImageStatusReady
 
-	return &UploadResult{Image: img, Variants: variants}, nil
+	return &UploadResult{Image: img, Variants: variants, Deduplicated: false}, nil
+}
+
+func (s *ImageService) findReadyByFingerprint(ctx context.Context, fingerprint string) (*model.Image, error) {
+	const query = `
+		SELECT id, fingerprint, original_filename, storage_path, mime_type,
+		       file_size_bytes, width, height, status, created_at
+		FROM images
+		WHERE fingerprint = $1 AND status = 'ready'
+		LIMIT 1
+	`
+
+	img := &model.Image{}
+	err := s.db.QueryRowContext(ctx, query, fingerprint).Scan(
+		&img.ID,
+		&img.Fingerprint,
+		&img.OriginalFilename,
+		&img.StoragePath,
+		&img.MimeType,
+		&img.FileSizeBytes,
+		&img.Width,
+		&img.Height,
+		&img.Status,
+		&img.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return img, nil
+}
+
+func (s *ImageService) listVariants(ctx context.Context, imageID string) ([]*model.ImageVariant, error) {
+	const query = `
+		SELECT id, image_id, preset_name, storage_path, mime_type,
+		       file_size_bytes, width, height, created_at
+		FROM image_variants
+		WHERE image_id = $1
+		ORDER BY preset_name
+	`
+
+	rows, err := s.db.QueryContext(ctx, query, imageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	variants := make([]*model.ImageVariant, 0)
+	for rows.Next() {
+		variant := &model.ImageVariant{}
+		if err := rows.Scan(
+			&variant.ID,
+			&variant.ImageID,
+			&variant.PresetName,
+			&variant.StoragePath,
+			&variant.MimeType,
+			&variant.FileSizeBytes,
+			&variant.Width,
+			&variant.Height,
+			&variant.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		variants = append(variants, variant)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return variants, nil
 }
 
 func (s *ImageService) persistVariants(ctx context.Context, variants []*model.ImageVariant) error {
