@@ -207,7 +207,7 @@ export default function Home() {
                 </p>
                 <a
                   href={variant.url}
-                  download={`${variant.preset_name}.jpg`}
+                  download={`${variant.preset_name}.webp`}
                   target="_blank"
                   rel="noreferrer"
                   className="mt-auto inline-flex justify-center items-center rounded-md bg-blue-500 px-3 py-2 text-sm font-medium text-white hover:bg-blue-600 transition"

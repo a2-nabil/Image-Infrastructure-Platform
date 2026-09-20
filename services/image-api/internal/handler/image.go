@@ -140,9 +140,25 @@ func (h *ImageHandler) GetVariantHandler(w http.ResponseWriter, r *http.Request)
 	}
 	defer body.Close()
 
+	if contentType == "" || contentType == "application/octet-stream" {
+		contentType = "image/webp"
+	}
+	if variant.MimeType != "" {
+		contentType = variant.MimeType
+	}
+	if strings.HasSuffix(strings.ToLower(variant.StoragePath), ".webp") {
+		contentType = "image/webp"
+	}
+
+	filename := preset + ".webp"
+	if strings.HasSuffix(strings.ToLower(variant.StoragePath), ".jpg") ||
+		strings.HasSuffix(strings.ToLower(variant.StoragePath), ".jpeg") {
+		filename = preset + ".jpg"
+	}
+
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "public, max-age=86400")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", preset+".jpg"))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filename))
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, body)
 }

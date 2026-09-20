@@ -7,13 +7,14 @@ import (
 	"image"
 	"io"
 
+	"github.com/chai2010/webp"
 	"github.com/disintegration/imaging"
 	_ "golang.org/x/image/webp"
 
 	"image-infrastructure-platform/services/image-api/internal/model"
 )
 
-const variantJPEGQuality = 85
+const variantWebPQuality = 80
 
 type variantPreset struct {
 	name string
@@ -41,8 +42,8 @@ var variantPresets = []variantPreset{
 	},
 }
 
-// GenerateVariants decodes the raw image, creates preset JPEGs, uploads them to
-// S3, and returns variant metadata ready for persistence.
+// GenerateVariants decodes the raw image, creates preset WebP variants, uploads
+// them to S3, and returns variant metadata ready for persistence.
 func (s *ImageService) GenerateVariants(ctx context.Context, imgID string, rawReader io.Reader) ([]*model.ImageVariant, error) {
 	if s == nil || s.s3 == nil {
 		return nil, fmt.Errorf("image service is not initialized")
@@ -64,12 +65,12 @@ func (s *ImageService) GenerateVariants(ctx context.Context, imgID string, rawRe
 		resized := preset.fn(src)
 
 		var buf bytes.Buffer
-		if err := imaging.Encode(&buf, resized, imaging.JPEG, imaging.JPEGQuality(variantJPEGQuality)); err != nil {
+		if err := webp.Encode(&buf, resized, &webp.Options{Quality: variantWebPQuality}); err != nil {
 			return nil, fmt.Errorf("encode %s variant: %w", preset.name, err)
 		}
 
-		storagePath := fmt.Sprintf("variants/%s/%s.jpg", imgID, preset.name)
-		if _, err := s.s3.UploadImage(ctx, storagePath, bytes.NewReader(buf.Bytes()), "image/jpeg"); err != nil {
+		storagePath := fmt.Sprintf("variants/%s/%s.webp", imgID, preset.name)
+		if _, err := s.s3.UploadImage(ctx, storagePath, bytes.NewReader(buf.Bytes()), "image/webp"); err != nil {
 			return nil, fmt.Errorf("upload %s variant: %w", preset.name, err)
 		}
 
@@ -78,7 +79,7 @@ func (s *ImageService) GenerateVariants(ctx context.Context, imgID string, rawRe
 			ImageID:       imgID,
 			PresetName:    preset.name,
 			StoragePath:   storagePath,
-			MimeType:      "image/jpeg",
+			MimeType:      "image/webp",
 			FileSizeBytes: int64(buf.Len()),
 			Width:         bounds.Dx(),
 			Height:        bounds.Dy(),
