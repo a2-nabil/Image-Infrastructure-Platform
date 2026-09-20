@@ -7,17 +7,25 @@ import (
 	"net/http"
 	"strings"
 
+	"image-infrastructure-platform/services/image-api/internal/middleware"
+	"image-infrastructure-platform/services/image-api/internal/model"
 	"image-infrastructure-platform/services/image-api/internal/service"
 )
 
 // ImageHandler serves image upload endpoints.
 type ImageHandler struct {
-	images *service.ImageService
+	images        *service.ImageService
+	cdnBaseURL    string
+	serverBaseURL string
 }
 
 // NewImageHandler constructs an ImageHandler.
-func NewImageHandler(images *service.ImageService) *ImageHandler {
-	return &ImageHandler{images: images}
+func NewImageHandler(images *service.ImageService, cdnBaseURL, serverBaseURL string) *ImageHandler {
+	return &ImageHandler{
+		images:        images,
+		cdnBaseURL:    strings.TrimRight(strings.TrimSpace(cdnBaseURL), "/"),
+		serverBaseURL: strings.TrimRight(strings.TrimSpace(serverBaseURL), "/"),
+	}
 }
 
 type uploadSuccessResponse struct {
@@ -35,7 +43,15 @@ type uploadSuccessData struct {
 	SizeBytes    int64               `json:"size_bytes"`
 	Status       string              `json:"status"`
 	Deduplicated bool                `json:"deduplicated,omitempty"`
+	Location     *uploadLocationData `json:"location,omitempty"`
 	Variants     []uploadVariantData `json:"variants"`
+}
+
+type uploadLocationData struct {
+	Latitude  float64  `json:"latitude"`
+	Longitude float64  `json:"longitude"`
+	Altitude  *float64 `json:"altitude,omitempty"`
+	Source    string   `json:"source"`
 }
 
 type uploadVariantData struct {
@@ -71,11 +87,22 @@ func (h *ImageHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.images.ProcessAndUpload(r.Context(), header)
+	result, err := h.images.ProcessAndUpload(
+		r.Context(),
+		header,
+		middleware.GetUserID(r.Context()),
+		middleware.GetGuestSessionID(r.Context()),
+		service.ParseOptionalFloat(r.FormValue("latitude")),
+		service.ParseOptionalFloat(r.FormValue("longitude")),
+	)
 	if err != nil {
 		status, code := mapUploadError(err)
 		writeError(w, status, code, err.Error())
 		return
+	}
+
+	if result.GuestSessionID != "" {
+		w.Header().Set("X-Guest-Session-ID", result.GuestSessionID)
 	}
 
 	img := result.Image
@@ -84,7 +111,7 @@ func (h *ImageHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		variants = append(variants, uploadVariantData{
 			ID:        variant.ID,
 			Preset:    variant.PresetName,
-			URL:       absoluteURL(r, h.images.VariantProxyPath(img.ID, variant.PresetName)),
+			URL:       h.variantPublicURL(r, img.ID, variant),
 			Width:     variant.Width,
 			Height:    variant.Height,
 			SizeBytes: variant.FileSizeBytes,
@@ -109,13 +136,20 @@ func (h *ImageHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 			SizeBytes:    img.FileSizeBytes,
 			Status:       img.Status,
 			Deduplicated: result.Deduplicated,
+			Location:     locationPayload(img),
 			Variants:     variants,
 		},
 	})
 }
 
 // GetVariantHandler streams a stored variant from S3 via the API.
+// Also known as ServeVariantHandler for CDN/proxy edge caching.
 func (h *ImageHandler) GetVariantHandler(w http.ResponseWriter, r *http.Request) {
+	h.ServeVariantHandler(w, r)
+}
+
+// ServeVariantHandler streams a stored variant from S3 with long-lived cache headers.
+func (h *ImageHandler) ServeVariantHandler(w http.ResponseWriter, r *http.Request) {
 	imageID := r.PathValue("id")
 	preset := r.PathValue("preset")
 	if imageID == "" || preset == "" {
@@ -130,6 +164,14 @@ func (h *ImageHandler) GetVariantHandler(w http.ResponseWriter, r *http.Request)
 	}
 	if variant == nil {
 		writeError(w, http.StatusNotFound, "VARIANT_NOT_FOUND", "variant not found")
+		return
+	}
+
+	etag := fmt.Sprintf(`W/"%s"`, variant.ID)
+	if match := r.Header.Get("If-None-Match"); match != "" && match == etag {
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 
@@ -157,10 +199,23 @@ func (h *ImageHandler) GetVariantHandler(w http.ResponseWriter, r *http.Request)
 	}
 
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("ETag", etag)
 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filename))
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, body)
+}
+
+func (h *ImageHandler) variantPublicURL(r *http.Request, imageID string, variant *model.ImageVariant) string {
+	if h.cdnBaseURL != "" && variant != nil && variant.StoragePath != "" {
+		return h.cdnBaseURL + "/" + strings.TrimPrefix(variant.StoragePath, "/")
+	}
+
+	path := fmt.Sprintf("/api/v1/images/%s/variants/%s", imageID, variant.PresetName)
+	if h.serverBaseURL != "" {
+		return h.serverBaseURL + path
+	}
+	return absoluteURL(r, path)
 }
 
 func absoluteURL(r *http.Request, path string) string {
@@ -216,6 +271,22 @@ func intOrZero(v *int) int {
 		return 0
 	}
 	return *v
+}
+
+func locationPayload(img *model.Image) *uploadLocationData {
+	if img == nil || img.Latitude == nil || img.Longitude == nil {
+		return nil
+	}
+	source := ""
+	if img.LocationSource != nil {
+		source = *img.LocationSource
+	}
+	return &uploadLocationData{
+		Latitude:  *img.Latitude,
+		Longitude: *img.Longitude,
+		Altitude:  img.Altitude,
+		Source:    source,
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {

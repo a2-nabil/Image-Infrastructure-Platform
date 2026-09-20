@@ -44,7 +44,8 @@ var variantPresets = []variantPreset{
 
 // GenerateVariants decodes the raw image, creates preset WebP variants, uploads
 // them to S3, and returns variant metadata ready for persistence.
-func (s *ImageService) GenerateVariants(ctx context.Context, imgID string, rawReader io.Reader) ([]*model.ImageVariant, error) {
+// userID controls path prefix: users/{userID}/variants/... vs temp/variants/...
+func (s *ImageService) GenerateVariants(ctx context.Context, imgID string, userID *string, rawReader io.Reader) ([]*model.ImageVariant, error) {
 	if s == nil || s.s3 == nil {
 		return nil, fmt.Errorf("image service is not initialized")
 	}
@@ -69,7 +70,7 @@ func (s *ImageService) GenerateVariants(ctx context.Context, imgID string, rawRe
 			return nil, fmt.Errorf("encode %s variant: %w", preset.name, err)
 		}
 
-		storagePath := fmt.Sprintf("variants/%s/%s.webp", imgID, preset.name)
+		storagePath := variantStoragePath(userID, imgID, preset.name)
 		if _, err := s.s3.UploadImage(ctx, storagePath, bytes.NewReader(buf.Bytes()), "image/webp"); err != nil {
 			return nil, fmt.Errorf("upload %s variant: %w", preset.name, err)
 		}
@@ -87,4 +88,18 @@ func (s *ImageService) GenerateVariants(ctx context.Context, imgID string, rawRe
 	}
 
 	return variants, nil
+}
+
+func variantStoragePath(userID *string, imgID, presetName string) string {
+	if userID != nil && *userID != "" {
+		return fmt.Sprintf("users/%s/variants/%s/%s.webp", *userID, imgID, presetName)
+	}
+	return fmt.Sprintf("temp/variants/%s/%s.webp", imgID, presetName)
+}
+
+func rawStoragePath(userID *string, objectID, filename string) string {
+	if userID != nil && *userID != "" {
+		return fmt.Sprintf("users/%s/raw/%s/%s", *userID, objectID, filename)
+	}
+	return fmt.Sprintf("temp/raw/%s/%s", objectID, filename)
 }

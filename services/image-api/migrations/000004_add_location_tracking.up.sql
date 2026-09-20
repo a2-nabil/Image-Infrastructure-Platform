@@ -1,0 +1,7 @@
+ALTER TABLE images
+    ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS altitude DOUBLE PRECISION,
+    ADD COLUMN IF NOT EXISTS location_source VARCHAR(32);
+
+CREATE INDEX IF NOT EXISTS idx_images_lat_lng ON images(latitude, longitude) WHERE latitude IS NOT NULL;

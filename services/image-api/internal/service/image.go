@@ -16,12 +16,18 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/google/uuid"
 
 	"image-infrastructure-platform/services/image-api/internal/model"
 	"image-infrastructure-platform/services/image-api/internal/storage"
 )
 
-const maxUploadBytes = 10 * 1024 * 1024 // 10MB
+const (
+	maxUploadBytes    = 10 * 1024 * 1024 // 10MB
+	guestRetentionTTL = 72 * time.Hour
+)
 
 var allowedMIMETypes = map[string]struct{}{
 	"image/jpeg": {},
@@ -31,9 +37,10 @@ var allowedMIMETypes = map[string]struct{}{
 
 // UploadResult is the outcome of ProcessAndUpload including generated variants.
 type UploadResult struct {
-	Image        *model.Image
-	Variants     []*model.ImageVariant
-	Deduplicated bool
+	Image          *model.Image
+	Variants       []*model.ImageVariant
+	Deduplicated   bool
+	GuestSessionID string
 }
 
 // ImageService handles upload validation, S3 ingestion, and persistence.
@@ -49,7 +56,7 @@ func NewImageService(db *sql.DB, s3Client *storage.S3Client) *ImageService {
 
 // ProcessAndUpload validates the multipart image, uploads it to S3, generates
 // variants, persists metadata, and marks the image ready.
-func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipart.FileHeader) (*UploadResult, error) {
+func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipart.FileHeader, authUserID *uuid.UUID, guestSessionID string, clientLat, clientLng *float64) (*UploadResult, error) {
 	if s == nil || s.db == nil || s.s3 == nil {
 		return nil, fmt.Errorf("image service is not initialized")
 	}
@@ -90,6 +97,18 @@ func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipa
 	sum := sha256.Sum256(payload)
 	fingerprint := hex.EncodeToString(sum[:])
 
+	userID := userIDString(authUserID)
+	if userID == nil {
+		if guestSessionID == "" {
+			guestSessionID, err = newUUID()
+			if err != nil {
+				return nil, fmt.Errorf("generate guest session id: %w", err)
+			}
+		}
+	} else {
+		guestSessionID = ""
+	}
+
 	existing, err := s.findReadyByFingerprint(ctx, fingerprint)
 	if err != nil {
 		return nil, fmt.Errorf("lookup fingerprint: %w", err)
@@ -100,9 +119,10 @@ func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipa
 			return nil, fmt.Errorf("load existing variants: %w", err)
 		}
 		return &UploadResult{
-			Image:        existing,
-			Variants:     variants,
-			Deduplicated: true,
+			Image:          existing,
+			Variants:       variants,
+			Deduplicated:   true,
+			GuestSessionID: guestSessionID,
 		}, nil
 	}
 
@@ -112,13 +132,14 @@ func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipa
 	}
 
 	filename := sanitizeFilename(fileHeader.Filename)
-	storagePath := fmt.Sprintf("raw/%s/%s", objectID, filename)
+	storagePath := rawStoragePath(userID, objectID, filename)
 
 	if _, err := s.s3.UploadImage(ctx, storagePath, bytes.NewReader(payload), mimeType); err != nil {
 		return nil, fmt.Errorf("upload to s3: %w", err)
 	}
 
 	width, height := decodeDimensions(payload)
+	location := ResolveLocation(payload, clientLat, clientLng)
 
 	img := &model.Image{
 		Fingerprint:      fingerprint,
@@ -129,13 +150,28 @@ func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipa
 		Width:            width,
 		Height:           height,
 		Status:           model.ImageStatusProcessing,
+		UserID:           userID,
+		Latitude:         location.Latitude,
+		Longitude:        location.Longitude,
+		Altitude:         location.Altitude,
+	}
+	if location.Source != "" {
+		src := location.Source
+		img.LocationSource = &src
+	}
+	if userID == nil {
+		guestCopy := guestSessionID
+		img.GuestSessionID = &guestCopy
+		expires := time.Now().UTC().Add(guestRetentionTTL)
+		img.ExpiresAt = &expires
 	}
 
 	const insertSQL = `
 		INSERT INTO images (
 			fingerprint, original_filename, storage_path, mime_type,
-			file_size_bytes, width, height, status
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			file_size_bytes, width, height, status, user_id, guest_session_id, expires_at,
+			latitude, longitude, altitude, location_source
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		RETURNING id, created_at, updated_at
 	`
 
@@ -150,12 +186,19 @@ func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipa
 		img.Width,
 		img.Height,
 		img.Status,
+		nullableString(img.UserID),
+		nullableString(img.GuestSessionID),
+		nullableTime(img.ExpiresAt),
+		nullableFloat(img.Latitude),
+		nullableFloat(img.Longitude),
+		nullableFloat(img.Altitude),
+		nullableString(img.LocationSource),
 	).Scan(&img.ID, &img.CreatedAt, &img.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("persist image metadata: %w", err)
 	}
 
-	variants, err := s.GenerateVariants(ctx, img.ID, bytes.NewReader(payload))
+	variants, err := s.GenerateVariants(ctx, img.ID, userID, bytes.NewReader(payload))
 	if err != nil {
 		_ = s.updateImageStatus(ctx, img.ID, model.ImageStatusFailed)
 		return nil, fmt.Errorf("generate variants: %w", err)
@@ -171,19 +214,65 @@ func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipa
 	}
 	img.Status = model.ImageStatusReady
 
-	return &UploadResult{Image: img, Variants: variants, Deduplicated: false}, nil
+	return &UploadResult{
+		Image:          img,
+		Variants:       variants,
+		Deduplicated:   false,
+		GuestSessionID: guestSessionID,
+	}, nil
+}
+
+// ClaimGuestMedia promotes ephemeral guest images to permanent user assets.
+func (s *ImageService) ClaimGuestMedia(ctx context.Context, userID uuid.UUID, guestSessionID string) (int, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("image service is not initialized")
+	}
+	if guestSessionID == "" {
+		return 0, fmt.Errorf("guest_session_id is required")
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("begin claim transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	const updateSQL = `
+		UPDATE images
+		SET user_id = $1, expires_at = NULL, guest_session_id = NULL, updated_at = NOW()
+		WHERE guest_session_id = $2 AND expires_at > NOW()
+	`
+	res, err := tx.ExecContext(ctx, updateSQL, userID.String(), guestSessionID)
+	if err != nil {
+		return 0, fmt.Errorf("claim guest media: %w", err)
+	}
+	claimed, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("read claimed count: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit claim transaction: %w", err)
+	}
+	return int(claimed), nil
 }
 
 func (s *ImageService) findReadyByFingerprint(ctx context.Context, fingerprint string) (*model.Image, error) {
 	const query = `
 		SELECT id, fingerprint, original_filename, storage_path, mime_type,
-		       file_size_bytes, width, height, status, created_at
+		       file_size_bytes, width, height, status, user_id, guest_session_id,
+		       expires_at, latitude, longitude, altitude, location_source,
+		       created_at, updated_at
 		FROM images
-		WHERE fingerprint = $1 AND status = 'ready'
+		WHERE fingerprint = $1
+		  AND status = 'ready'
+		  AND (expires_at IS NULL OR expires_at > NOW())
 		LIMIT 1
 	`
 
 	img := &model.Image{}
+	var userID, guestSessionID, locationSource sql.NullString
+	var expiresAt sql.NullTime
+	var latitude, longitude, altitude sql.NullFloat64
 	err := s.db.QueryRowContext(ctx, query, fingerprint).Scan(
 		&img.ID,
 		&img.Fingerprint,
@@ -194,13 +283,46 @@ func (s *ImageService) findReadyByFingerprint(ctx context.Context, fingerprint s
 		&img.Width,
 		&img.Height,
 		&img.Status,
+		&userID,
+		&guestSessionID,
+		&expiresAt,
+		&latitude,
+		&longitude,
+		&altitude,
+		&locationSource,
 		&img.CreatedAt,
+		&img.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
+	}
+	if userID.Valid {
+		img.UserID = &userID.String
+	}
+	if guestSessionID.Valid {
+		img.GuestSessionID = &guestSessionID.String
+	}
+	if expiresAt.Valid {
+		t := expiresAt.Time
+		img.ExpiresAt = &t
+	}
+	if latitude.Valid {
+		v := latitude.Float64
+		img.Latitude = &v
+	}
+	if longitude.Valid {
+		v := longitude.Float64
+		img.Longitude = &v
+	}
+	if altitude.Valid {
+		v := altitude.Float64
+		img.Altitude = &v
+	}
+	if locationSource.Valid {
+		img.LocationSource = &locationSource.String
 	}
 	return img, nil
 }
@@ -344,6 +466,35 @@ func (s *ImageService) OpenVariantObject(ctx context.Context, variant *model.Ima
 		}
 	}
 	return body, contentType, nil
+}
+
+func userIDString(id *uuid.UUID) *string {
+	if id == nil {
+		return nil
+	}
+	s := id.String()
+	return &s
+}
+
+func nullableString(v *string) any {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+
+func nullableTime(v *time.Time) any {
+	if v == nil {
+		return nil
+	}
+	return *v
+}
+
+func nullableFloat(v *float64) any {
+	if v == nil {
+		return nil
+	}
+	return *v
 }
 
 func decodeDimensions(payload []byte) (*int, *int) {

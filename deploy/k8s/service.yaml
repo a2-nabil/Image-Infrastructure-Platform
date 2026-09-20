@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: image-api
+  labels:
+    app: image-api
+spec:
+  type: ClusterIP
+  selector:
+    app: image-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080
+      protocol: TCP

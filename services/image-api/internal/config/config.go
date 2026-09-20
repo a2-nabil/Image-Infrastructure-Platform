@@ -10,16 +10,19 @@ import (
 
 // Config holds immutable runtime configuration loaded from the environment.
 type Config struct {
-	Server   ServerConfig
-	Database DatabaseConfig
-	Redis    RedisConfig
-	AWS      AWSConfig
-	Logging  LoggingConfig
+	Server     ServerConfig
+	Database   DatabaseConfig
+	Redis      RedisConfig
+	AWS        AWSConfig
+	Auth       AuthConfig
+	Logging    LoggingConfig
+	CDNBaseURL string
 }
 
 type ServerConfig struct {
-	Port   string
-	AppEnv string
+	Port    string
+	AppEnv  string
+	BaseURL string
 }
 
 type DatabaseConfig struct {
@@ -42,6 +45,11 @@ type AWSConfig struct {
 	AccessKeyID     string
 	SecretAccessKey string
 	S3DevBucket     string
+}
+
+type AuthConfig struct {
+	JWTSecret      string
+	GoogleClientID string
 }
 
 type LoggingConfig struct {
@@ -68,8 +76,9 @@ func Load() (*Config, error) {
 
 	cfg := &Config{
 		Server: ServerConfig{
-			Port:   getenvDefault("PORT", "8080"),
-			AppEnv: getenvDefault("APP_ENV", "development"),
+			Port:    getenvDefault("PORT", "8080"),
+			AppEnv:  getenvDefault("APP_ENV", "development"),
+			BaseURL: strings.TrimRight(os.Getenv("SERVER_BASE_URL"), "/"),
 		},
 		Database: DatabaseConfig{
 			Host:     os.Getenv("POSTGRES_HOST"),
@@ -90,9 +99,18 @@ func Load() (*Config, error) {
 			SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
 			S3DevBucket:     os.Getenv("AWS_S3_DEV_BUCKET"),
 		},
+		Auth: AuthConfig{
+			JWTSecret:      os.Getenv("JWT_SECRET"),
+			GoogleClientID: os.Getenv("GOOGLE_CLIENT_ID"),
+		},
 		Logging: LoggingConfig{
 			Level: getenvDefault("LOG_LEVEL", "info"),
 		},
+		CDNBaseURL: strings.TrimRight(strings.TrimSpace(os.Getenv("CDN_BASE_URL")), "/"),
+	}
+
+	if cfg.Server.BaseURL == "" {
+		cfg.Server.BaseURL = "http://localhost:" + cfg.Server.Port
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -120,6 +138,26 @@ func (c *Config) RedisAddr() string {
 		port = "6379"
 	}
 	return fmt.Sprintf("redis://%s:%s/0", host, port)
+}
+
+// EffectiveCDNBaseURL returns a non-localhost CDN origin, or empty to use API proxy URLs.
+func (c *Config) EffectiveCDNBaseURL() string {
+	if c == nil {
+		return ""
+	}
+	raw := strings.TrimSpace(c.CDNBaseURL)
+	if raw == "" {
+		return ""
+	}
+	raw = strings.TrimRight(raw, "/")
+	lower := strings.ToLower(raw)
+	if strings.Contains(lower, "://localhost") ||
+		strings.Contains(lower, "://127.0.0.1") ||
+		strings.HasPrefix(lower, "localhost") ||
+		strings.HasPrefix(lower, "127.0.0.1") {
+		return ""
+	}
+	return raw
 }
 
 func (c *Config) validate() error {

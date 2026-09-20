@@ -71,16 +71,23 @@ func main() {
 	}
 
 	imageService := service.NewImageService(db, s3Client)
-	imageHandler := handler.NewImageHandler(imageService)
+	userService := service.NewUserService(db)
+	imageHandler := handler.NewImageHandler(imageService, cfg.EffectiveCDNBaseURL(), cfg.Server.BaseURL)
+	userHandler := handler.NewUserHandler(imageService)
+	authHandler := handler.NewAuthHandler(userService, cfg.Auth.JWTSecret, cfg.Auth.GoogleClientID, cfg.Server.AppEnv)
 
+	optionalAuth := middleware.OptionalAuthMiddleware(cfg.Auth.JWTSecret)
 	uploadLimiter := middleware.RateLimitMiddleware(rdb, 10, time.Minute, "upload")
 	variantLimiter := middleware.RateLimitMiddleware(rdb, 60, time.Minute, "variants")
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handler.HealthzHandler)
 	mux.HandleFunc("GET /readyz", handler.ReadyzHandler(db, rdb, s3Client))
-	mux.Handle("POST /api/v1/images", uploadLimiter(http.HandlerFunc(imageHandler.UploadHandler)))
+	mux.HandleFunc("POST /api/v1/auth/google", authHandler.GoogleAuthHandler)
+	mux.HandleFunc("POST /api/v1/auth/dev-token", authHandler.DevTokenHandler)
+	mux.Handle("POST /api/v1/images", uploadLimiter(optionalAuth(http.HandlerFunc(imageHandler.UploadHandler))))
 	mux.Handle("GET /api/v1/images/{id}/variants/{preset}", variantLimiter(http.HandlerFunc(imageHandler.GetVariantHandler)))
+	mux.Handle("POST /api/v1/users/claim-guest-media", optionalAuth(middleware.RequireAuth(http.HandlerFunc(userHandler.ClaimGuestMediaHandler))))
 
 	root := middleware.CORSMiddleware(middleware.RequestIDMiddleware(mux))
 

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: image-api-config
+  labels:
+    app: image-api
+data:
+  PORT: "8080"
+  APP_ENV: "production"
+  ENV: "production"
+  SERVER_BASE_URL: "http://image-api"
+  AWS_REGION: "ap-southeast-1"
+  S3_BUCKET: "a2n-personal-gallery"
+  AWS_S3_DEV_BUCKET: "a2n-personal-gallery"
+  POSTGRES_SSLMODE: "disable"
+  LOG_LEVEL: "info"
