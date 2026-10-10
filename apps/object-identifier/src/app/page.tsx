@@ -15,6 +15,56 @@ type IdentifyApiResponse =
   | { success: true; data: IdentifyResult }
   | { success: false; error: { code: string; message: string } };
 
+const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"] as const;
+
+const ALLOWED_DATA_URL_PREFIXES = [
+  "data:image/jpeg;",
+  "data:image/png;",
+  "data:image/webp;",
+] as const;
+
+function isAllowedImageType(type: string): boolean {
+  return (ALLOWED_IMAGE_TYPES as readonly string[]).includes(type);
+}
+
+/** Build a data:image URL only after MIME checks (safe for <img src>). */
+async function readSafeImagePreview(file: File): Promise<string> {
+  if (!isAllowedImageType(file.type)) {
+    throw new Error("Please upload a valid image file (JPEG, PNG, or WebP)");
+  }
+  if (file.size > 4 * 1024 * 1024) {
+    throw new Error("Image size must be less than 4MB");
+  }
+
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result !== "string") {
+        reject(new Error("Failed to read image"));
+        return;
+      }
+      resolve(reader.result);
+    };
+    reader.onerror = () => reject(new Error("Failed to read image"));
+    reader.readAsDataURL(file);
+  });
+
+  if (!ALLOWED_DATA_URL_PREFIXES.some((prefix) => dataUrl.startsWith(prefix))) {
+    throw new Error("Please upload a valid image file (JPEG, PNG, or WebP)");
+  }
+
+  return dataUrl;
+}
+
+function asSafeImageSrc(value: string | null): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  return ALLOWED_DATA_URL_PREFIXES.some((prefix) => value.startsWith(prefix))
+    ? value
+    : undefined;
+}
+
 export default function Home() {
   const [preview, setPreview] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -25,12 +75,27 @@ export default function Home() {
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    // Allow selecting the same file again.
+    e.target.value = "";
     if (!file) {
       return;
     }
 
-    setPreview(URL.createObjectURL(file));
-    void identifyObject(file);
+    void (async () => {
+      try {
+        setError(null);
+        const safePreview = await readSafeImagePreview(file);
+        setPreview(safePreview);
+        await identifyObject(file);
+      } catch (err) {
+        setPreview(null);
+        setResult(null);
+        setUploadData(null);
+        setBackendNote(null);
+        setError(err instanceof Error ? err.message : "Failed to load image");
+        setLoading(false);
+      }
+    })();
   };
 
   const identifyObject = async (file: File) => {
@@ -45,8 +110,7 @@ export default function Home() {
         throw new Error("Image size must be less than 4MB");
       }
 
-      const validTypes = ["image/jpeg", "image/png", "image/webp"];
-      if (!validTypes.includes(file.type)) {
+      if (!isAllowedImageType(file.type)) {
         throw new Error("Please upload a valid image file (JPEG, PNG, or WebP)");
       }
 
@@ -89,6 +153,7 @@ export default function Home() {
   };
 
   const variants = uploadData?.variants ?? [];
+  const safePreviewSrc = asSafeImageSrc(preview);
 
   return (
     <main className="container mx-auto px-4 py-8 max-w-4xl">
@@ -115,11 +180,11 @@ export default function Home() {
             htmlFor="image-upload"
             className="cursor-pointer flex flex-col items-center p-8"
           >
-            {preview ? (
+            {safePreviewSrc ? (
               <div className="mb-4 relative">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
-                  src={preview}
+                  src={safePreviewSrc}
                   alt="Preview"
                   className="max-h-64 rounded-lg"
                 />
@@ -140,7 +205,7 @@ export default function Home() {
                 </p>
               </div>
             )}
-            {!preview && (
+            {!safePreviewSrc && (
               <span className="bg-blue-500 text-white px-4 py-2 rounded-md hover:bg-blue-600 transition">
                 Choose Image
               </span>
@@ -165,7 +230,7 @@ export default function Home() {
       {uploadData?.deduplicated && !loading && (
         <div className="mb-8">
           <span className="inline-flex items-center rounded-full bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 border border-emerald-200">
-            ⚡ Instant Deduplication Hit
+            Instant Deduplication Hit
           </span>
         </div>
       )}
