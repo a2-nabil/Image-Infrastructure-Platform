@@ -38,7 +38,8 @@ export type ImageUploadFailure = {
 
 export type ImageUploadResult = ImageUploadSuccess | ImageUploadFailure;
 
-const DEFAULT_IMAGE_API_URL = "http://localhost:8080/api/v1";
+// Prefer same-origin "/api/v1" so Netlify (or next.config rewrites) can proxy to Render/local Go.
+const DEFAULT_IMAGE_API_URL = "/api/v1";
 
 function apiBaseURL(): string {
   return (
