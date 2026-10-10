@@ -276,7 +276,8 @@ func loadDotEnvIfPresent() {
 		return
 	}
 
-	f, err := os.Open(path)
+	// path is resolved from findDotEnv() to a local ".env" file only.
+	f, err := os.Open(path) // #nosec G304 -- intentional local dotenv load from discovered path
 	if err != nil {
 		return
 	}

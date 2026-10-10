@@ -76,6 +76,11 @@ type uploadErrorBody struct {
 
 // UploadHandler handles POST /api/v1/images.
 func (h *ImageHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
+	// Cap the full request body before multipart parsing to reduce DoS risk.
+	// Slightly above the 10MB file limit to allow multipart framing overhead.
+	const maxBodyBytes = (10 << 20) + (1 << 20)
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+
 	if err := r.ParseMultipartForm(10 << 20); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_MULTIPART", "invalid multipart form")
 		return

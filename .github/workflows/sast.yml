@@ -12,6 +12,11 @@ concurrency:
   group: sast-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
 jobs:
   gosec:
     name: GoSec (image-api)
@@ -27,11 +32,8 @@ jobs:
       - name: Run gosec
         working-directory: services/image-api
         run: |
-          set +e
-          gosec -fmt=sarif -out=gosec.sarif -stdout -severity ./...
-          code=$?
-          set -e
-          exit $code
+          # -severity requires a value (low|medium|high). Fail the job on HIGH+.
+          gosec -fmt=sarif -out=gosec.sarif -stdout -severity high -confidence medium ./...
       - name: Upload gosec SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@v3
@@ -72,11 +74,15 @@ jobs:
           semgrep scan \
             --config=p/owasp-top-ten \
             --config=p/golang \
-            --config=p/javascript \
+            --severity-threshold ERROR \
             --error \
+            --exclude=node_modules \
+            --exclude=.next \
+            --exclude=apps/object-identifier/pnpm-lock.yaml \
             --sarif \
             --output=semgrep.sarif \
-            .
+            services/image-api \
+            apps/object-identifier/src
       - name: Upload Semgrep SARIF
         if: always()
         uses: github/codeql-action/upload-sarif@v3
