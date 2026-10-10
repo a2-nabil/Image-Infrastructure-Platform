@@ -1,36 +1,59 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Object Identifier
 
-## Getting Started
+Next.js frontend for the [Image Infrastructure Platform](../../README.md).
 
-First, run the development server:
+Uploads images to the Go Image API, shows a live preview and WebP variants, and identifies the primary object with Gemini via `POST /api/identify`.
+
+## What this app needs
+
+| Dependency | Required for | Default |
+|------------|--------------|---------|
+| Image API (`:8080`) | Variants, dedupe, storage metadata | `http://localhost:8080/api/v1` |
+| Postgres + Redis | Image API itself | via root Docker Compose |
+| AWS S3 | Persisting originals/variants | from root `.env` |
+| `GEMINI_API_KEY` | Object identification | set in `.env.local` |
+
+Without the Image API, the UI still runs identify (upload is mocked and an amber note appears). Without `GEMINI_API_KEY`, identify returns `MISSING_API_KEY`.
+
+## Environment
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+cp .env.local.example .env.local
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GEMINI_API_KEY` | Yes (for identify) | Google Gemini API key |
+| `NEXT_PUBLIC_IMAGE_API_URL` | No | Defaults to `http://localhost:8080/api/v1` |
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Run (frontend only)
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+npm install
+npm run dev
+```
 
-## Learn More
+Open [http://localhost:3000](http://localhost:3000).
 
-To learn more about Next.js, take a look at the following resources:
+Upload limits in the UI: JPEG / PNG / WebP, max **4 MB**.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Full local stack
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+From the **repo root** (Docker Desktop must be running):
 
-## Deploy on Vercel
+```bash
+cp .env.example .env          # fill AWS keys + keep Postgres defaults
+docker compose -f infra/docker/docker-compose.yml up -d
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+cd services/image-api && go run ./cmd/server
+# in another terminal:
+cd apps/object-identifier && npm run dev
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Then open http://localhost:3000 and upload an image, or run:
+
+```bash
+bash scripts/smoke-test.sh
+```
+
+See the root [README](../../README.md) for architecture, API surface, curl examples, and troubleshooting.

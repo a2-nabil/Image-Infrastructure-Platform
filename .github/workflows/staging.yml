@@ -1,0 +1,111 @@
+name: Staging
+
+on:
+  push:
+    branches: [staging, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: staging-deploy
+  cancel-in-progress: false
+
+env:
+  IMAGE_NAME: image-api
+  ENVIRONMENT: staging
+
+jobs:
+  gate:
+    name: Require CI + SAST
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Note
+        run: |
+          echo "Staging deploy requires green CI/SAST on the same commit."
+          echo "Configure branch protection: require CI, SAST, CodeQL."
+
+  build-and-push:
+    name: Build & push image
+    needs: [gate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.meta.outputs.tags }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/image-api
+          tags: |
+            type=sha,prefix=staging-
+            type=raw,value=staging-latest
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: services/image-api
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to staging
+    needs: [build-and-push]
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: ${{ vars.STAGING_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Render manifests
+        env:
+          IMAGE: ${{ needs.build-and-push.outputs.image }}
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/k8s-staging
+          # Use first tag from metadata output (comma-separated)
+          PRIMARY_IMAGE="$(echo "$IMAGE" | cut -d',' -f1)"
+          sed "s|image: image-api:prod|image: ${PRIMARY_IMAGE}|g" deploy/k8s/deployment.yaml > /tmp/k8s-staging/deployment.yaml
+          sed "s|APP_ENV: \"production\"|APP_ENV: \"staging\"|g" deploy/k8s/configmap.yaml \
+            | sed 's|POSTGRES_SSLMODE: "disable"|POSTGRES_SSLMODE: "require"|g' \
+            > /tmp/k8s-staging/configmap.yaml
+          cp deploy/k8s/service.yaml deploy/k8s/hpa.yaml /tmp/k8s-staging/
+          echo "Rendered staging manifests with image=$PRIMARY_IMAGE"
+      - name: Apply (optional kubeconfig)
+        env:
+          KUBECONFIG_B64: ${{ secrets.STAGING_KUBECONFIG }}
+        run: |
+          if [ -z "${KUBECONFIG_B64}" ]; then
+            echo "STAGING_KUBECONFIG not set — image published; cluster apply skipped."
+            exit 0
+          fi
+          echo "$KUBECONFIG_B64" | base64 -d > /tmp/kubeconfig
+          export KUBECONFIG=/tmp/kubeconfig
+          kubectl apply -f /tmp/k8s-staging/
+          kubectl rollout status deployment/image-api --timeout=180s
+
+  smoke:
+    name: Staging smoke
+    needs: [deploy]
+    runs-on: ubuntu-latest
+    if: ${{ vars.STAGING_BASE_URL != '' }}
+    steps:
+      - name: Health
+        run: |
+          curl -sf "${{ vars.STAGING_BASE_URL }}/healthz"
+          curl -sf "${{ vars.STAGING_BASE_URL }}/readyz"

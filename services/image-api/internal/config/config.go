@@ -20,9 +20,11 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port    string
-	AppEnv  string
-	BaseURL string
+	Port           string
+	AppEnv         string
+	BaseURL        string
+	CORSOrigins    []string
+	MigrateOnStart bool
 }
 
 type DatabaseConfig struct {
@@ -74,11 +76,14 @@ var validLogLevels = map[string]struct{}{
 func Load() (*Config, error) {
 	loadDotEnvIfPresent()
 
+	appEnv := getenvDefault("APP_ENV", "development")
 	cfg := &Config{
 		Server: ServerConfig{
-			Port:    getenvDefault("PORT", "8080"),
-			AppEnv:  getenvDefault("APP_ENV", "development"),
-			BaseURL: strings.TrimRight(os.Getenv("SERVER_BASE_URL"), "/"),
+			Port:           getenvDefault("PORT", "8080"),
+			AppEnv:         appEnv,
+			BaseURL:        strings.TrimRight(os.Getenv("SERVER_BASE_URL"), "/"),
+			CORSOrigins:    splitCSV(os.Getenv("CORS_ALLOWED_ORIGINS")),
+			MigrateOnStart: migrateOnStartDefault(appEnv, os.Getenv("MIGRATE_ON_START")),
 		},
 		Database: DatabaseConfig{
 			Host:     os.Getenv("POSTGRES_HOST"),
@@ -86,7 +91,7 @@ func Load() (*Config, error) {
 			User:     os.Getenv("POSTGRES_USER"),
 			Password: os.Getenv("POSTGRES_PASSWORD"),
 			Name:     os.Getenv("POSTGRES_DB"),
-			SSLMode:  getenvDefault("POSTGRES_SSLMODE", "disable"),
+			SSLMode:  getenvDefault("POSTGRES_SSLMODE", defaultSSLMode(appEnv)),
 		},
 		Redis: RedisConfig{
 			URL:  os.Getenv("REDIS_URL"),
@@ -111,6 +116,9 @@ func Load() (*Config, error) {
 
 	if cfg.Server.BaseURL == "" {
 		cfg.Server.BaseURL = "http://localhost:" + cfg.Server.Port
+	}
+	if len(cfg.Server.CORSOrigins) == 0 && appEnv == "development" {
+		cfg.Server.CORSOrigins = []string{"http://localhost:3000"}
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -199,10 +207,58 @@ func (c *Config) validate() error {
 		errs = append(errs, fmt.Sprintf("invalid LOG_LEVEL %q (allowed: debug, info, warn, error)", c.Logging.Level))
 	}
 
+	if c.Server.AppEnv == "staging" || c.Server.AppEnv == "production" {
+		if strings.TrimSpace(c.Auth.JWTSecret) == "" {
+			errs = append(errs, "JWT_SECRET is required when APP_ENV is staging or production")
+		}
+		if len(c.Server.CORSOrigins) == 0 {
+			errs = append(errs, "CORS_ALLOWED_ORIGINS is required when APP_ENV is staging or production")
+		}
+		ssl := strings.ToLower(strings.TrimSpace(c.Database.SSLMode))
+		if ssl == "" || ssl == "disable" {
+			errs = append(errs, "POSTGRES_SSLMODE must not be disable when APP_ENV is staging or production")
+		}
+	}
+
 	if len(errs) > 0 {
 		return fmt.Errorf("%s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+func splitCSV(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimRight(strings.TrimSpace(p), "/")
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func defaultSSLMode(appEnv string) string {
+	if appEnv == "staging" || appEnv == "production" {
+		return "require"
+	}
+	return "disable"
+}
+
+func migrateOnStartDefault(appEnv, raw string) bool {
+	if raw != "" {
+		switch strings.ToLower(strings.TrimSpace(raw)) {
+		case "1", "true", "yes", "on":
+			return true
+		default:
+			return false
+		}
+	}
+	// Auto-migrate in development only; staging/prod should use an explicit migrate Job.
+	return appEnv == "development"
 }
 
 func getenvDefault(key, fallback string) string {
@@ -228,7 +284,7 @@ func loadDotEnvIfPresent() {
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		line := strings.TrimSpace(strings.TrimSuffix(scanner.Text(), "\r"))
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
@@ -240,7 +296,7 @@ func loadDotEnvIfPresent() {
 		if !ok {
 			continue
 		}
-		key = strings.TrimSpace(key)
+		key = strings.TrimSpace(strings.TrimSuffix(key, "\r"))
 		if key == "" {
 			continue
 		}
@@ -248,7 +304,7 @@ func loadDotEnvIfPresent() {
 			continue
 		}
 
-		value = strings.TrimSpace(value)
+		value = strings.TrimSpace(strings.TrimSuffix(value, "\r"))
 		value = unquote(value)
 		_ = os.Setenv(key, value)
 	}

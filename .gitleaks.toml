@@ -1,0 +1,14 @@
+title = "Image Infrastructure Platform"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow empty placeholders and documentation examples"
+paths = [
+  '''\.env\.example$''',
+  '''\.env\.local\.example$''',
+  '''deploy/k8s/secret\.yaml\.example$''',
+  '''docs/.*''',
+  '''README\.md$''',
+]

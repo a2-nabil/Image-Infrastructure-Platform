@@ -1,0 +1,45 @@
+# Install: pip install pre-commit && pre-commit install
+# Or:     make install-hooks
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        exclude: ^deploy/k8s/.*\.example$
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: detect-private-key
+      - id: no-commit-to-branch
+        args: ["--branch", "main", "--branch", "production"]
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.24.2
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: go-fmt
+        name: go fmt (image-api)
+        entry: bash -c 'cd services/image-api && test -z "$(gofmt -l .)" || (echo "gofmt needed:" && gofmt -l . && exit 1)'
+        language: system
+        files: ^services/image-api/.*\.go$
+        pass_filenames: false
+
+      - id: go-vet
+        name: go vet (image-api)
+        entry: bash -c 'cd services/image-api && go vet ./...'
+        language: system
+        files: ^services/image-api/.*\.go$
+        pass_filenames: false
+
+      - id: frontend-lint
+        name: eslint (object-identifier)
+        entry: bash -c 'cd apps/object-identifier && npm run lint'
+        language: system
+        files: ^apps/object-identifier/.*\.(ts|tsx|js|jsx|mjs)$
+        pass_filenames: false

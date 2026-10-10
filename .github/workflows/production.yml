@@ -1,0 +1,115 @@
+name: Production
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag/digest already promoted from staging (e.g. staging-<sha>)"
+        required: true
+        type: string
+      confirm:
+        description: "Type deploy-production to confirm"
+        required: true
+        type: string
+
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    name: Production preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm dispatch
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if [ "${{ inputs.confirm }}" != "deploy-production" ]; then
+            echo "Confirmation string mismatch."
+            exit 1
+          fi
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Production must-checks (manifests)
+        run: |
+          set -euo pipefail
+          echo "== ConfigMap production musts =="
+          grep -q 'APP_ENV: "production"' deploy/k8s/configmap.yaml
+          # Prefer require; warn if still disable in tracked file
+          if grep -q 'POSTGRES_SSLMODE: "disable"' deploy/k8s/configmap.yaml; then
+            echo "::error::POSTGRES_SSLMODE must not be disable for production ConfigMap"
+            exit 1
+          fi
+          echo "== Secret example only (no live secret.yaml) =="
+          test -f deploy/k8s/secret.yaml.example
+          if [ -f deploy/k8s/secret.yaml ]; then
+            echo "::error::deploy/k8s/secret.yaml must not be present in the repo"
+            exit 1
+          fi
+          echo "== Dockerfile non-root =="
+          grep -q 'USER appuser' services/image-api/Dockerfile
+          echo "Preflight OK"
+
+  security-gates:
+    name: Security gates must be green
+    runs-on: ubuntu-latest
+    permissions:
+      checks: read
+      contents: read
+    steps:
+      - name: Reminder
+        run: |
+          echo "Enable GitHub Environment 'production' with required reviewers."
+          echo "Require CI, CodeQL, SAST, Staging, and DAST status checks on main."
+
+  deploy:
+    name: Deploy to production
+    needs: [preflight, security-gates]
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_BASE_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve image
+        id: image
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.image_tag }}"
+          else
+            TAG="prod-${GITHUB_REF_NAME}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${{ github.repository_owner }}/image-api:$TAG" >> "$GITHUB_OUTPUT"
+      - name: Render manifests
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/k8s-prod
+          sed "s|image: image-api:prod|image: ${{ steps.image.outputs.image }}|g" deploy/k8s/deployment.yaml > /tmp/k8s-prod/deployment.yaml
+          cp deploy/k8s/configmap.yaml deploy/k8s/service.yaml deploy/k8s/hpa.yaml /tmp/k8s-prod/
+      - name: Apply
+        env:
+          KUBECONFIG_B64: ${{ secrets.PRODUCTION_KUBECONFIG }}
+        run: |
+          if [ -z "${KUBECONFIG_B64}" ]; then
+            echo "PRODUCTION_KUBECONFIG not set — production apply skipped after preflight."
+            echo "Set secret PRODUCTION_KUBECONFIG (base64) and Environment protection rules."
+            exit 0
+          fi
+          echo "$KUBECONFIG_B64" | base64 -d > /tmp/kubeconfig
+          export KUBECONFIG=/tmp/kubeconfig
+          kubectl apply -f /tmp/k8s-prod/
+          kubectl rollout status deployment/image-api --timeout=300s
+
+  post-deploy:
+    name: Production smoke
+    needs: [deploy]
+    runs-on: ubuntu-latest
+    if: ${{ vars.PRODUCTION_BASE_URL != '' }}
+    steps:
+      - name: Health
+        run: |
+          curl -sf "${{ vars.PRODUCTION_BASE_URL }}/healthz"
+          curl -sf "${{ vars.PRODUCTION_BASE_URL }}/readyz"

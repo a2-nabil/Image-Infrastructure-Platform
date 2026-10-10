@@ -1,0 +1,38 @@
+# One-shot DB migration Job for staging/production.
+# Apply after ConfigMap/Secrets exist and before rolling the Deployment.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: image-api-migrate
+  labels:
+    app: image-api
+spec:
+  ttlSecondsAfterFinished: 300
+  backoffLimit: 1
+  template:
+    metadata:
+      labels:
+        app: image-api-migrate
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: migrate
+          image: migrate/migrate:v4.18.1
+          args:
+            - "-path=/migrations"
+            - "-database=$(DATABASE_URL)"
+            - "up"
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: image-api-secrets
+                  key: POSTGRES_URL
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+              readOnly: true
+      volumes:
+        - name: migrations
+          configMap:
+            name: image-api-migrations

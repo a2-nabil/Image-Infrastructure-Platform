@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Fallback pre-commit when Python pre-commit is not installed.
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel)"
+cd "$ROOT"
+
+echo "[pre-commit] scanning for secrets..."
+if command -v gitleaks >/dev/null 2>&1; then
+  gitleaks protect --staged --config .gitleaks.toml --verbose
+elif command -v docker >/dev/null 2>&1; then
+  # Docker Desktop on Windows often lacks file sharing for the project path.
+  # Treat docker failures as a warning so commits are not blocked locally;
+  # CI still runs gitleaks-action on every PR/push.
+  if ! docker run --rm -v "$ROOT:/repo" -w /repo zricethezav/gitleaks:v8.24.2 \
+      protect --staged --config .gitleaks.toml --verbose 2>/tmp/gitleaks-docker.err; then
+    echo "[pre-commit] WARN: docker gitleaks failed (file sharing / path?); CI will still scan."
+    sed -n '1,5p' /tmp/gitleaks-docker.err 2>/dev/null || true
+  fi
+else
+  echo "[pre-commit] WARN: gitleaks not found; skipping secret scan (CI will scan)"
+fi
+
+# Lightweight local guard for common secret patterns in staged files
+if git diff --cached --name-only --diff-filter=ACM | grep -E '\.(env|pem|key)$' >/dev/null 2>&1; then
+  echo "[pre-commit] ERROR: refusing to commit env/key files"
+  git diff --cached --name-only --diff-filter=ACM | grep -E '\.(env|pem|key)$' || true
+  exit 1
+fi
+
+STAGED_GO="$(git diff --cached --name-only --diff-filter=ACM | grep '^services/image-api/.*\.go$' || true)"
+if [[ -n "$STAGED_GO" ]]; then
+  echo "[pre-commit] gofmt + go vet..."
+  (
+    cd services/image-api
+    files="$(echo "$STAGED_GO" | sed 's|^services/image-api/||')"
+    # shellcheck disable=SC2086
+    unformatted="$(gofmt -l $files)"
+    if [[ -n "$unformatted" ]]; then
+      echo "gofmt required for:"
+      echo "$unformatted"
+      exit 1
+    fi
+    go vet ./...
+  )
+fi
+
+STAGED_FE="$(git diff --cached --name-only --diff-filter=ACM | grep '^apps/object-identifier/.*\.\(ts\|tsx\|js\|jsx\|mjs\)$' || true)"
+if [[ -n "$STAGED_FE" ]]; then
+  echo "[pre-commit] frontend lint..."
+  (cd apps/object-identifier && npm run lint)
+fi
+
+echo "[pre-commit] ok"

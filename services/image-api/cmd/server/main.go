@@ -33,7 +33,7 @@ func main() {
 	slogLogger := logger.New(cfg.Server.AppEnv, cfg.Logging.Level)
 	dbURL := buildDatabaseURL(cfg.Database)
 
-	if cfg.Server.AppEnv == "development" {
+	if cfg.Server.MigrateOnStart {
 		migrationsPath := resolveMigrationsPath()
 		if err := database.RunMigrations(dbURL, migrationsPath); err != nil {
 			slogLogger.Error("database migrations failed", "error", err)
@@ -89,7 +89,7 @@ func main() {
 	mux.Handle("GET /api/v1/images/{id}/variants/{preset}", variantLimiter(http.HandlerFunc(imageHandler.GetVariantHandler)))
 	mux.Handle("POST /api/v1/users/claim-guest-media", optionalAuth(middleware.RequireAuth(http.HandlerFunc(userHandler.ClaimGuestMediaHandler))))
 
-	root := middleware.CORSMiddleware(middleware.RequestIDMiddleware(mux))
+	root := middleware.CORSMiddleware(cfg.Server.CORSOrigins)(middleware.RequestIDMiddleware(mux))
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Server.Port,
