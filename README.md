@@ -65,12 +65,13 @@ Frontend upload limit for identify: **4 MB** (JPEG / PNG / WebP).
 - **AWS** credentials with access to an S3 bucket
 - **Gemini API key** (for object identification)
 - Optional: [golang-migrate](https://github.com/golang-migrate/migrate) CLI for manual migrations
-- Optional: [pre-commit](https://pre-commit.com/) + [gitleaks](https://github.com/gitleaks/gitleaks) for local hooks
+- Optional: [pre-commit](https://pre-commit.com/) + [gitleaks](https://github.com/gitleaks/gitleaks) for local hooks  
+  (`make install-hooks` downloads a native gitleaks into `.tools/` so Docker Desktop file sharing is not required on Windows)
 
 ## CI/CD & security gates
 
 ```bash
-make install-hooks   # pre-commit (secrets, gofmt, lint)
+make install-hooks   # native gitleaks + pre-commit (secrets, gofmt, lint)
 make ci-local        # local CI subset
 ```
 

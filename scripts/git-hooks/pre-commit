@@ -5,20 +5,50 @@ set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 
-echo "[pre-commit] scanning for secrets..."
-if command -v gitleaks >/dev/null 2>&1; then
-  gitleaks protect --staged --config .gitleaks.toml --verbose
-elif command -v docker >/dev/null 2>&1; then
-  # Docker Desktop on Windows often lacks file sharing for the project path.
-  # Treat docker failures as a warning so commits are not blocked locally;
-  # CI still runs gitleaks-action on every PR/push.
-  if ! docker run --rm -v "$ROOT:/repo" -w /repo zricethezav/gitleaks:v8.24.2 \
-      protect --staged --config .gitleaks.toml --verbose 2>/tmp/gitleaks-docker.err; then
-    echo "[pre-commit] WARN: docker gitleaks failed (file sharing / path?); CI will still scan."
-    sed -n '1,5p' /tmp/gitleaks-docker.err 2>/dev/null || true
+resolve_gitleaks() {
+  if command -v gitleaks >/dev/null 2>&1; then
+    command -v gitleaks
+    return 0
   fi
+  if [[ -x "${ROOT}/.tools/gitleaks.exe" ]]; then
+    echo "${ROOT}/.tools/gitleaks.exe"
+    return 0
+  fi
+  if [[ -x "${ROOT}/.tools/gitleaks" ]]; then
+    echo "${ROOT}/.tools/gitleaks"
+    return 0
+  fi
+  if [[ -x "${ROOT}/scripts/ensure-gitleaks.sh" ]]; then
+    bash "${ROOT}/scripts/ensure-gitleaks.sh"
+    return 0
+  fi
+  return 1
+}
+
+echo "[pre-commit] scanning for secrets..."
+GITLEAKS_BIN=""
+if GITLEAKS_BIN="$(resolve_gitleaks)"; then
+  "$GITLEAKS_BIN" protect --staged --config .gitleaks.toml --verbose
+elif command -v docker >/dev/null 2>&1; then
+  # Prefer Windows-style bind mount so Docker Desktop can resolve paths with spaces.
+  MOUNT_SRC="$ROOT"
+  if command -v cygpath >/dev/null 2>&1; then
+    MOUNT_SRC="$(cygpath -w "$ROOT")"
+  fi
+  err_file="$(mktemp)"
+  if ! docker run --rm \
+      --mount "type=bind,source=${MOUNT_SRC},target=/repo" \
+      -w /repo \
+      zricethezav/gitleaks:v8.24.2 \
+      protect --staged --config .gitleaks.toml --verbose 2>"$err_file"; then
+    echo "[pre-commit] WARN: docker gitleaks failed; install native gitleaks or add the project folder in Docker Desktop → Settings → Resources → File Sharing."
+    echo "[pre-commit] tip: bash scripts/ensure-gitleaks.sh"
+    sed -n '1,8p' "$err_file" 2>/dev/null || true
+  fi
+  rm -f "$err_file"
 else
   echo "[pre-commit] WARN: gitleaks not found; skipping secret scan (CI will scan)"
+  echo "[pre-commit] tip: bash scripts/ensure-gitleaks.sh"
 fi
 
 # Lightweight local guard for common secret patterns in staged files
