@@ -5,7 +5,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"image-infrastructure-platform/services/image-api/internal/metrics"
 )
@@ -67,22 +70,23 @@ func AccessLogMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 				return
 			}
 
+			// Sanitize user-controlled values before logging (CWE-117 / go/log-injection).
 			attrs := []any{
-				"method", r.Method,
-				"path", r.URL.Path,
-				"route", route,
+				"method", sanitizeForLog(r.Method, 16),
+				"path", sanitizeForLog(r.URL.Path, 512),
+				"route", sanitizeForLog(route, 256),
 				"status", rec.status,
 				"duration_ms", duration.Milliseconds(),
 				"bytes", rec.bytes,
-				"request_id", GetRequestID(r.Context()),
-				"remote_ip", clientIP(r),
-				"user_agent", r.UserAgent(),
+				"request_id", sanitizeForLog(GetRequestID(r.Context()), 128),
+				"remote_ip", sanitizeForLog(clientIP(r), 128),
+				"user_agent", sanitizeForLog(r.UserAgent(), 256),
 			}
 			if uid := GetUserID(r.Context()); uid != nil {
-				attrs = append(attrs, "user_id", uid.String())
+				attrs = append(attrs, "user_id", sanitizeForLog(uid.String(), 64))
 			}
 			if guest := GetGuestSessionID(r.Context()); guest != "" {
-				attrs = append(attrs, "guest_session_id", guest)
+				attrs = append(attrs, "guest_session_id", sanitizeForLog(guest, 128))
 			}
 
 			switch {
@@ -95,4 +99,37 @@ func AccessLogMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			}
 		})
 	}
+}
+
+// sanitizeForLog strips control characters (especially CR/LF) so clients cannot
+// forge additional log lines, and truncates overly long values.
+func sanitizeForLog(value string, maxLen int) string {
+	if value == "" {
+		return ""
+	}
+	if maxLen <= 0 {
+		maxLen = 256
+	}
+
+	var b strings.Builder
+	b.Grow(min(len(value), maxLen))
+	for _, r := range value {
+		switch {
+		case r == '\n', r == '\r':
+			b.WriteByte(' ')
+		case unicode.IsControl(r):
+			// Drop other control characters (tabs become space for readability).
+			if r == '\t' {
+				b.WriteByte(' ')
+			}
+		case !utf8.ValidRune(r):
+			b.WriteByte('?')
+		default:
+			b.WriteRune(r)
+		}
+		if b.Len() >= maxLen {
+			break
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
