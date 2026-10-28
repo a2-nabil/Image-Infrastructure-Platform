@@ -2,7 +2,7 @@
 
 Next.js frontend for the [Image Infrastructure Platform](../../README.md).
 
-Uploads images to the Go Image API, shows a live preview and WebP variants, and identifies the primary object with Gemini via `POST /api/identify`.
+Runs **upload** (Go Image API) and **identify** (Gemini via `POST /api/identify`) in parallel so the UI can show whichever response finishes first. After upload returns `processing`, the app polls `GET /api/v1/images/{id}` until async workers produce WebP variants.
 
 ## What this app needs
 
@@ -24,7 +24,7 @@ cp .env.local.example .env.local
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `GEMINI_API_KEY` | Yes (for identify) | Google Gemini API key |
-| `NEXT_PUBLIC_IMAGE_API_URL` | No | Defaults to `http://localhost:8080/api/v1` |
+| `NEXT_PUBLIC_IMAGE_API_URL` | No | Defaults to same-origin `/api/v1` (Netlify/`next.config` rewrite) |
 
 ## Run (frontend only)
 

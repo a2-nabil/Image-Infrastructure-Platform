@@ -34,8 +34,9 @@ A full-stack image platform that stores, deduplicates, and transforms uploads vi
 1. Client sends `multipart/form-data` with field `image` to `POST /api/v1/images`.
 2. API validates MIME type (`jpeg` / `png` / `webp`) and size (max **10 MB**).
 3. SHA-256 fingerprint is computed. If a ready image with the same hash exists, variants are returned immediately (**deduplication**).
-4. Otherwise the original is uploaded to S3, WebP variants are generated, metadata is written to Postgres, and the image status becomes `ready`.
-5. Guest uploads get a guest session ID (`X-Guest-Session-ID`) and a **72-hour** retention TTL. Authenticated uploads are owned by the user.
+4. Otherwise the original is uploaded to S3, metadata is written with status `processing`, and a **Redis queue job** is enqueued. Upload returns immediately (empty `variants`).
+5. In-process **variant workers** (`BRPOP` consumers) generate WebP presets, persist them, and mark the image `ready`. Clients poll `GET /api/v1/images/{id}` until `status` is `ready` or `failed`.
+6. Guest uploads get a guest session ID (`X-Guest-Session-ID`) and a **72-hour** retention TTL. Authenticated uploads are owned by the user. A background **guest expiry sweeper** (every 15 minutes) deletes expired guest originals + variants from S3, then removes the Postgres rows (`image_variants` cascade).
 
 ### Variant presets
 
@@ -49,10 +50,10 @@ All variants are encoded as WebP (quality 80).
 
 ### Object identification flow
 
-The Next.js app:
+The Next.js app runs **upload and identify in parallel**. Whichever finishes first paints first; variants keep polling in the background while identify may already be visible.
 
-1. Uploads the image to the Go Image API (falls back to a local mock if the API is down).
-2. Sends the same file to `POST /api/identify`, which calls Gemini (`gemini-3.1-flash-lite`) and returns structured JSON (`object_name`, `confidence_score`, `summary`, etc.).
+1. `POST` to the Go Image API (falls back to a local mock if the API is down); if `status=processing`, poll `GET /api/v1/images/{id}` until workers finish.
+2. In parallel, `POST /api/identify` calls Gemini (`gemini-3.1-flash-lite`) and returns structured JSON (`object_name`, `confidence_score`, `summary`, etc.).
 
 Frontend upload limit for identify: **4 MB** (JPEG / PNG / WebP).
 
@@ -247,8 +248,10 @@ curl -s -X POST http://localhost:3000/api/identify \
 |--------|------|------|-------|
 | `GET` | `/healthz` | — | Liveness |
 | `GET` | `/readyz` | — | Postgres + Redis + S3 |
-| `POST` | `/api/v1/images` | Optional JWT | Upload; 10 req/min (Redis) |
-| `GET` | `/api/v1/images/{id}/variants/{preset}` | — | Stream variant; 60 req/min |
+| `POST` | `/api/v1/images` | Optional JWT | Upload; enqueues async variants; 10 req/min (Redis) |
+| `GET` | `/api/v1/images/{id}` | Owner JWT or `X-Guest-Session-ID` | Poll metadata + variants (`processing` → `ready`) |
+| `GET` | `/api/v1/images/{id}/variants/{preset}` | Owner JWT or `X-Guest-Session-ID` | Stream variant; 60 req/min |
+| `GET` | `/metrics` | — | Prometheus metrics |
 | `POST` | `/api/v1/auth/google` | — | Exchange Google ID token → JWT |
 | `POST` | `/api/v1/auth/dev-token` | — | Dev-only JWT mint |
 | `POST` | `/api/v1/users/claim-guest-media` | Required JWT | Claim guest uploads |
@@ -262,7 +265,7 @@ Full upload contract: [`docs/api/v1-contract.md`](docs/api/v1-contract.md).
 ├── apps/object-identifier/     # Next.js UI + Gemini identify route
 ├── services/image-api/         # Go API
 │   ├── cmd/server/             # Entrypoint
-│   ├── internal/               # handlers, services, storage, auth, middleware
+│   ├── internal/               # handlers, services, queue, worker, storage, middleware
 │   ├── migrations/             # SQL migrations
 │   └── Dockerfile
 ├── infra/docker/               # Local Postgres + Redis
@@ -288,21 +291,26 @@ make migrate-down
 
 Manifests live in `deploy/k8s/`:
 
-- `deployment.yaml` — 2 replicas, probes, non-root, read-only root FS
+- `deployment.yaml` — 2 replicas, probes, non-root, read-only root FS, Prometheus scrape annotations
+- `serviceaccount.yaml` — IRSA annotation for S3 access (no long-lived AWS keys in the pod)
 - `service.yaml` — ClusterIP → port 8080
 - `hpa.yaml` — scale 2–10 on 75% CPU
 - `configmap.yaml` / `secret.yaml.example` — config and secrets
 
-Copy and fill `secret.yaml.example` before applying; never commit real secrets.
+Copy and fill `secret.yaml.example` before applying; never commit real secrets. On EKS, set the ServiceAccount role ARN and leave `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` unset.
 
 ## Implementation notes
 
-- **Deduplication** is content-addressed via SHA-256; identical bytes reuse the existing ready record and variants.
+- **Ownership**: `GET` image/variant requires matching JWT `user_id` or `X-Guest-Session-ID`. Deduplication is tenant-scoped.
+- **Presigned URLs**: set `AWS_S3_PRESIGN_URLS=true` to return short-lived S3 GET URLs after ownership checks (`AWS_S3_PRESIGN_TTL_SECONDS`, default 900).
+- **IRSA**: staging/production may omit static AWS keys and use the default credential chain (EKS IRSA). Development still requires static keys unless you override carefully.
+- **Access logs + metrics**: structured `http_access` logs and Prometheus text on `GET /metrics`.
+- **Deduplication** is content-addressed via SHA-256 within the same owner/guest session.
 - **CORS** and **X-Request-ID** middleware wrap all routes; request IDs are echoed when supplied.
 - **Rate limits** use Redis fixed windows (`upload`: 10/min, `variants`: 60/min).
 - **Storage paths**: authenticated → `users/{userID}/...`; guests → `temp/...`.
-- **CDN**: when `CDN_BASE_URL` is a non-localhost origin, variant URLs point at the CDN; otherwise they use the API proxy path.
-- Frontend degrades gracefully if the Image API is unreachable so identify can still be tested.
+- **CDN**: when `CDN_BASE_URL` is a non-localhost origin and presign is off, variant URLs point at the CDN; otherwise they use the API proxy path or presigned S3 URLs.
+- Frontend stores `X-Guest-Session-ID` in localStorage and sends it on upload/poll so ownership checks pass.
 
 ## Troubleshooting
 

@@ -18,9 +18,12 @@ import (
 	"image-infrastructure-platform/services/image-api/internal/database"
 	"image-infrastructure-platform/services/image-api/internal/handler"
 	"image-infrastructure-platform/services/image-api/internal/logger"
+	"image-infrastructure-platform/services/image-api/internal/metrics"
 	"image-infrastructure-platform/services/image-api/internal/middleware"
+	"image-infrastructure-platform/services/image-api/internal/queue"
 	"image-infrastructure-platform/services/image-api/internal/service"
 	"image-infrastructure-platform/services/image-api/internal/storage"
+	"image-infrastructure-platform/services/image-api/internal/worker"
 )
 
 func main() {
@@ -71,8 +74,24 @@ func main() {
 	}
 
 	imageService := service.NewImageService(db, s3Client)
+	variantQueue := queue.NewVariantQueue(rdb)
+	imageService.SetVariantQueue(queue.ServicePublisher{Queue: variantQueue})
+
+	workerCtx, stopWorkers := context.WithCancel(context.Background())
+	defer stopWorkers()
+	variantWorker := worker.NewVariantWorker(variantQueue, imageService, slogLogger, 2)
+	variantWorker.Start(workerCtx)
+	guestSweeper := worker.NewGuestExpirySweeper(imageService, slogLogger, 15*time.Minute, 50)
+	guestSweeper.Start(workerCtx)
+
 	userService := service.NewUserService(db)
-	imageHandler := handler.NewImageHandler(imageService, cfg.EffectiveCDNBaseURL(), cfg.Server.BaseURL)
+	imageHandler := handler.NewImageHandler(
+		imageService,
+		cfg.EffectiveCDNBaseURL(),
+		cfg.Server.BaseURL,
+		cfg.AWS.PresignURLs,
+		cfg.AWS.PresignTTLSeconds,
+	)
 	userHandler := handler.NewUserHandler(imageService)
 	authHandler := handler.NewAuthHandler(userService, cfg.Auth.JWTSecret, cfg.Auth.GoogleClientID, cfg.Server.AppEnv)
 
@@ -83,13 +102,22 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handler.HealthzHandler)
 	mux.HandleFunc("GET /readyz", handler.ReadyzHandler(db, rdb, s3Client))
+	mux.HandleFunc("GET /metrics", metrics.Handler)
 	mux.HandleFunc("POST /api/v1/auth/google", authHandler.GoogleAuthHandler)
 	mux.HandleFunc("POST /api/v1/auth/dev-token", authHandler.DevTokenHandler)
-	mux.Handle("POST /api/v1/images", uploadLimiter(optionalAuth(http.HandlerFunc(imageHandler.UploadHandler))))
+	mux.Handle("POST /api/v1/images", uploadLimiter(http.HandlerFunc(imageHandler.UploadHandler)))
+	mux.Handle("GET /api/v1/images/{id}", http.HandlerFunc(imageHandler.GetImageHandler))
 	mux.Handle("GET /api/v1/images/{id}/variants/{preset}", variantLimiter(http.HandlerFunc(imageHandler.GetVariantHandler)))
-	mux.Handle("POST /api/v1/users/claim-guest-media", optionalAuth(middleware.RequireAuth(http.HandlerFunc(userHandler.ClaimGuestMediaHandler))))
+	mux.Handle("POST /api/v1/users/claim-guest-media", middleware.RequireAuth(http.HandlerFunc(userHandler.ClaimGuestMediaHandler)))
 
-	root := middleware.CORSMiddleware(cfg.Server.CORSOrigins)(middleware.RequestIDMiddleware(mux))
+	// Order: request ID → optional auth (JWT/guest) → access logs/metrics → routes.
+	root := middleware.CORSMiddleware(cfg.Server.CORSOrigins)(
+		middleware.RequestIDMiddleware(
+			optionalAuth(
+				middleware.AccessLogMiddleware(slogLogger)(mux),
+			),
+		),
+	)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Server.Port,
@@ -103,6 +131,11 @@ func main() {
 		slogLogger.Info("image-api starting",
 			"env", cfg.Server.AppEnv,
 			"port", cfg.Server.Port,
+			"async_variants", true,
+			"guest_expiry_sweeper", true,
+			"aws_credential_mode", s3Client.CredentialMode(),
+			"presign_urls", cfg.AWS.PresignURLs,
+			"ownership_enforced", true,
 		)
 		errCh <- srv.ListenAndServe()
 	}()
@@ -114,12 +147,14 @@ func main() {
 	case err := <-errCh:
 		if err != nil && err != http.ErrServerClosed {
 			slogLogger.Error("server stopped", "error", err)
+			stopWorkers()
 			_ = rdb.Close()
 			_ = db.Close()
 			os.Exit(1)
 		}
 	case sig := <-sigCh:
 		slog.Info("server shutting down...", "signal", sig.String())
+		stopWorkers()
 
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

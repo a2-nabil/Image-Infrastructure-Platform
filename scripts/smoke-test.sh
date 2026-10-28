@@ -37,9 +37,12 @@ ready="$(curl -sf "$API_BASE/readyz")"
 echo "$ready" | tee "$tmpdir/readyz.json"
 echo "$ready" | grep -q '"status":"ready"' || { echo "FAIL: API not ready"; exit 1; }
 
+GUEST_SESSION="smoke-guest-$(date +%s)"
+
 echo "==> upload"
-http_code="$(curl -s -o "$tmpdir/upload.json" -w "%{http_code}" -X POST "$API_BASE/api/v1/images" \
+http_code="$(curl -s -D "$tmpdir/upload.headers" -o "$tmpdir/upload.json" -w "%{http_code}" -X POST "$API_BASE/api/v1/images" \
   -H "X-Request-ID: smoke-$(date +%s)" \
+  -H "X-Guest-Session-ID: ${GUEST_SESSION}" \
   -F "image=@${SMOKE_IMG};type=image/jpeg")"
 cat "$tmpdir/upload.json"
 echo
@@ -49,10 +52,33 @@ echo "upload HTTP $http_code"
 IMG_ID="$(node -e "const fs=require('fs');const j=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); if(!j.success) process.exit(1); process.stdout.write(j.data.id)" "$tmpdir/upload.json")"
 echo "image id: $IMG_ID"
 
+echo "==> wait for async variants (worker queue)"
+ready_status=""
+for _ in $(seq 1 45); do
+  curl -sf -H "X-Guest-Session-ID: ${GUEST_SESSION}" "$API_BASE/api/v1/images/${IMG_ID}" > "$tmpdir/image.json" || true
+  ready_status="$(node -e "const fs=require('fs');try{const j=JSON.parse(fs.readFileSync(process.argv[1],'utf8'));process.stdout.write(j.success?String(j.data.status||''):'')}catch(e){}" "$tmpdir/image.json")"
+  echo "  status=$ready_status"
+  if [[ "$ready_status" == "ready" ]]; then
+    break
+  fi
+  if [[ "$ready_status" == "failed" ]]; then
+    echo "FAIL: variant worker marked image failed"
+    cat "$tmpdir/image.json"
+    exit 1
+  fi
+  sleep 1
+done
+[[ "$ready_status" == "ready" ]] || { echo "FAIL: timed out waiting for variants"; cat "$tmpdir/image.json"; exit 1; }
+
+echo "==> ownership deny without guest session"
+deny_code="$(curl -s -o /dev/null -w "%{http_code}" "$API_BASE/api/v1/images/${IMG_ID}")"
+echo "  unauthenticated GET -> HTTP $deny_code"
+[[ "$deny_code" == "403" ]] || { echo "FAIL: expected 403 without ownership"; exit 1; }
+
 echo "==> variants"
 for preset in thumbnail small medium; do
   out="$tmpdir/${preset}.webp"
-  code="$(curl -s -o "$out" -w "%{http_code}" "$API_BASE/api/v1/images/${IMG_ID}/variants/${preset}")"
+  code="$(curl -s -o "$out" -w "%{http_code}" -H "X-Guest-Session-ID: ${GUEST_SESSION}" "$API_BASE/api/v1/images/${IMG_ID}/variants/${preset}")"
   size="$(wc -c < "$out" | tr -d ' ')"
   echo "  $preset -> HTTP $code ($size bytes)"
   [[ "$code" == "200" ]] || { echo "FAIL: variant $preset"; exit 1; }
@@ -61,10 +87,14 @@ done
 
 echo "==> dedupe"
 curl -s -o "$tmpdir/dedupe.json" -w "http=%{http_code}\n" -X POST "$API_BASE/api/v1/images" \
+  -H "X-Guest-Session-ID: ${GUEST_SESSION}" \
   -F "image=@${SMOKE_IMG};type=image/jpeg"
 cat "$tmpdir/dedupe.json"
 echo
 grep -q '"deduplicated":true' "$tmpdir/dedupe.json" || { echo "FAIL: expected deduplicated=true"; exit 1; }
+
+echo "==> metrics"
+curl -sf "$API_BASE/metrics" | tee "$tmpdir/metrics.txt" | grep -q "image_api_http_requests_total" || { echo "FAIL: metrics missing"; exit 1; }
 
 code="$(curl -s -o /dev/null -w "%{http_code}" "$IDENTIFY_URL" || true)"
 if [[ "$code" != "000" ]]; then

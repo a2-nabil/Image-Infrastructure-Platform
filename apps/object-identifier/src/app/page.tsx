@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Loader, Upload } from "lucide-react";
 import ResultDisplay, {
   type IdentifyResult,
@@ -8,6 +8,7 @@ import ResultDisplay, {
 import {
   formatBytes,
   uploadImage,
+  waitForImageReady,
   type ImageUploadData,
 } from "@/lib/image-api";
 
@@ -65,95 +66,170 @@ function asSafeImageSrc(value: string | null): string | undefined {
     : undefined;
 }
 
+async function identifyWithGemini(file: File): Promise<IdentifyResult> {
+  const formData = new FormData();
+  formData.append("image", file);
+
+  const response = await fetch("/api/identify", {
+    method: "POST",
+    body: formData,
+  });
+
+  const payload = (await response.json()) as IdentifyApiResponse;
+
+  if (!response.ok || !payload.success) {
+    const message =
+      !payload.success && payload.error?.message
+        ? payload.error.message
+        : "Failed to identify object";
+    throw new Error(message);
+  }
+
+  return payload.data;
+}
+
 export default function Home() {
   const [preview, setPreview] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [identifyLoading, setIdentifyLoading] = useState(false);
+  const [uploadLoading, setUploadLoading] = useState(false);
+  const [variantsLoading, setVariantsLoading] = useState(false);
   const [result, setResult] = useState<IdentifyResult | null>(null);
   const [uploadData, setUploadData] = useState<ImageUploadData | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [identifyError, setIdentifyError] = useState<string | null>(null);
   const [backendNote, setBackendNote] = useState<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+    };
+  }, []);
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    // Allow selecting the same file again.
     e.target.value = "";
     if (!file) {
       return;
     }
 
     void (async () => {
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
       try {
         setError(null);
+        setIdentifyError(null);
+        setResult(null);
+        setUploadData(null);
+        setBackendNote(null);
+        setVariantsLoading(false);
+
         const safePreview = await readSafeImagePreview(file);
         setPreview(safePreview);
-        await identifyObject(file);
+
+        // Fire both APIs in parallel; UI updates as each settles.
+        setIdentifyLoading(true);
+        setUploadLoading(true);
+
+        const identifyPromise = identifyWithGemini(file)
+          .then((data) => {
+            if (!controller.signal.aborted) {
+              setResult(data);
+              setIdentifyError(null);
+            }
+          })
+          .catch((err: unknown) => {
+            if (!controller.signal.aborted) {
+              setIdentifyError(
+                err instanceof Error ? err.message : "Failed to identify object",
+              );
+              setResult(null);
+            }
+          })
+          .finally(() => {
+            if (!controller.signal.aborted) {
+              setIdentifyLoading(false);
+            }
+          });
+
+        const uploadPromise = uploadImage(file)
+          .then(async (uploadResult) => {
+            if (controller.signal.aborted) {
+              return;
+            }
+
+            if (!uploadResult.success) {
+              setBackendNote(
+                uploadResult.error?.message || "Image upload failed.",
+              );
+              return;
+            }
+
+            if (uploadResult.mocked) {
+              setBackendNote(
+                "Go Image API unavailable — continuing with local identify flow.",
+              );
+              setUploadData(uploadResult.data);
+              return;
+            }
+
+            setUploadData(uploadResult.data);
+
+            // Async worker path: poll until variants are ready.
+            if (
+              !uploadResult.data.deduplicated &&
+              (uploadResult.data.status === "processing" ||
+                (uploadResult.data.variants?.length ?? 0) === 0)
+            ) {
+              setVariantsLoading(true);
+              const ready = await waitForImageReady(uploadResult.data.id, {
+                signal: controller.signal,
+                onUpdate: (partial) => {
+                  if (!controller.signal.aborted) {
+                    setUploadData(partial);
+                  }
+                },
+              });
+              if (!controller.signal.aborted && ready) {
+                setUploadData(ready);
+              }
+            }
+          })
+          .catch((err: unknown) => {
+            if (!controller.signal.aborted) {
+              setBackendNote(
+                err instanceof Error
+                  ? err.message
+                  : "Image upload failed unexpectedly.",
+              );
+            }
+          })
+          .finally(() => {
+            if (!controller.signal.aborted) {
+              setUploadLoading(false);
+              setVariantsLoading(false);
+            }
+          });
+
+        await Promise.allSettled([identifyPromise, uploadPromise]);
       } catch (err) {
         setPreview(null);
         setResult(null);
         setUploadData(null);
         setBackendNote(null);
         setError(err instanceof Error ? err.message : "Failed to load image");
-        setLoading(false);
+        setIdentifyLoading(false);
+        setUploadLoading(false);
+        setVariantsLoading(false);
       }
     })();
   };
 
-  const identifyObject = async (file: File) => {
-    try {
-      setLoading(true);
-      setError(null);
-      setResult(null);
-      setUploadData(null);
-      setBackendNote(null);
-
-      if (file.size > 4 * 1024 * 1024) {
-        throw new Error("Image size must be less than 4MB");
-      }
-
-      if (!isAllowedImageType(file.type)) {
-        throw new Error("Please upload a valid image file (JPEG, PNG, or WebP)");
-      }
-
-      const uploadResult = await uploadImage(file);
-      if (uploadResult.mocked) {
-        setBackendNote(
-          "Go Image API unavailable — continuing with local identify flow.",
-        );
-      } else if (uploadResult.success) {
-        setUploadData(uploadResult.data);
-      }
-
-      const formData = new FormData();
-      formData.append("image", file);
-
-      const response = await fetch("/api/identify", {
-        method: "POST",
-        body: formData,
-      });
-
-      const payload = (await response.json()) as IdentifyApiResponse;
-
-      if (!response.ok || !payload.success) {
-        const message =
-          !payload.success && payload.error?.message
-            ? payload.error.message
-            : "Failed to identify object";
-        throw new Error(message);
-      }
-
-      setResult(payload.data);
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : "Failed to identify object";
-      setError(message);
-      setResult(null);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const variants = uploadData?.variants ?? [];
   const safePreviewSrc = asSafeImageSrc(preview);
+  const anyLoading = identifyLoading || uploadLoading || variantsLoading;
 
   return (
     <main className="container mx-auto px-4 py-8 max-w-4xl">
@@ -163,6 +239,9 @@ export default function Home() {
         </h1>
         <p className="text-lg text-gray-600">
           Upload an image and let AI identify what&apos;s in it
+        </p>
+        <p className="text-sm text-gray-500 mt-2">
+          Identify and upload run in parallel — results appear as each finishes.
         </p>
       </div>
 
@@ -214,20 +293,44 @@ export default function Home() {
         </div>
       </div>
 
-      {loading && (
-        <div className="text-center py-8">
-          <Loader className="w-8 h-8 animate-spin mx-auto mb-4 text-blue-500" />
-          <p className="text-gray-600">Analyzing your image...</p>
+      {anyLoading && (
+        <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 mb-8 space-y-2">
+          {identifyLoading && (
+            <p className="text-sm text-slate-700 flex items-center gap-2">
+              <Loader className="w-4 h-4 animate-spin text-blue-500" />
+              AI identify running…
+            </p>
+          )}
+          {uploadLoading && (
+            <p className="text-sm text-slate-700 flex items-center gap-2">
+              <Loader className="w-4 h-4 animate-spin text-blue-500" />
+              Uploading to image API…
+            </p>
+          )}
+          {variantsLoading && (
+            <p className="text-sm text-slate-700 flex items-center gap-2">
+              <Loader className="w-4 h-4 animate-spin text-blue-500" />
+              Worker generating variants…
+            </p>
+          )}
         </div>
       )}
 
-      {backendNote && !loading && (
+      {backendNote && (
         <div className="bg-amber-50 border border-amber-200 text-amber-800 p-4 rounded-lg mb-8">
           <p className="text-sm">{backendNote}</p>
         </div>
       )}
 
-      {uploadData?.deduplicated && !loading && (
+      {uploadData?.status === "processing" && variants.length === 0 && (
+        <div className="mb-8">
+          <span className="inline-flex items-center rounded-full bg-sky-50 px-4 py-2 text-sm font-medium text-sky-700 border border-sky-200">
+            Queued for async variant worker
+          </span>
+        </div>
+      )}
+
+      {uploadData?.deduplicated && (
         <div className="mb-8">
           <span className="inline-flex items-center rounded-full bg-emerald-50 px-4 py-2 text-sm font-medium text-emerald-700 border border-emerald-200">
             Instant Deduplication Hit
@@ -242,7 +345,14 @@ export default function Home() {
         </div>
       )}
 
-      {variants.length > 0 && !loading && (
+      {identifyError && (
+        <div className="bg-red-50 border border-red-200 text-red-600 p-4 rounded-lg mb-8">
+          <p className="font-medium">Identify error</p>
+          <p className="text-sm">{identifyError}</p>
+        </div>
+      )}
+
+      {variants.length > 0 && (
         <div className="bg-white rounded-xl shadow-lg p-6 mb-8 animate-fade-in">
           <h2 className="text-2xl font-semibold mb-6 text-gray-800">
             Image Variants
@@ -285,7 +395,7 @@ export default function Home() {
         </div>
       )}
 
-      {result && !loading && (
+      {result && (
         <div className="mb-8">
           <ResultDisplay result={result} />
         </div>

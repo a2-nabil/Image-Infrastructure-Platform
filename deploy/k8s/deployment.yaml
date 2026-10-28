@@ -18,7 +18,12 @@ spec:
     metadata:
       labels:
         app: image-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
     spec:
+      serviceAccountName: image-api
       containers:
         - name: image-api
           image: image-api:prod
@@ -27,6 +32,14 @@ spec:
             - name: http
               containerPort: 8080
               protocol: TCP
+          env:
+            # Prefer IRSA (ServiceAccount annotation). Leave static keys unset in secrets.
+            - name: AWS_USE_STATIC_CREDENTIALS
+              value: "false"
+            - name: AWS_S3_PRESIGN_URLS
+              value: "true"
+            - name: AWS_S3_PRESIGN_TTL_SECONDS
+              value: "900"
           envFrom:
             - configMapRef:
                 name: image-api-config

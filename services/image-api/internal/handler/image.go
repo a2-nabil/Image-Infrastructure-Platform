@@ -6,7 +6,9 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
+	"image-infrastructure-platform/services/image-api/internal/metrics"
 	"image-infrastructure-platform/services/image-api/internal/middleware"
 	"image-infrastructure-platform/services/image-api/internal/model"
 	"image-infrastructure-platform/services/image-api/internal/service"
@@ -17,14 +19,22 @@ type ImageHandler struct {
 	images        *service.ImageService
 	cdnBaseURL    string
 	serverBaseURL string
+	usePresign    bool
+	presignTTL    time.Duration
 }
 
 // NewImageHandler constructs an ImageHandler.
-func NewImageHandler(images *service.ImageService, cdnBaseURL, serverBaseURL string) *ImageHandler {
+func NewImageHandler(images *service.ImageService, cdnBaseURL, serverBaseURL string, usePresign bool, presignTTLSeconds int) *ImageHandler {
+	ttl := time.Duration(presignTTLSeconds) * time.Second
+	if ttl <= 0 {
+		ttl = 15 * time.Minute
+	}
 	return &ImageHandler{
 		images:        images,
 		cdnBaseURL:    strings.TrimRight(strings.TrimSpace(cdnBaseURL), "/"),
 		serverBaseURL: strings.TrimRight(strings.TrimSpace(serverBaseURL), "/"),
+		usePresign:    usePresign,
+		presignTTL:    ttl,
 	}
 }
 
@@ -106,6 +116,8 @@ func (h *ImageHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	metrics.Default.IncUpload(result.Deduplicated)
+
 	if result.GuestSessionID != "" {
 		w.Header().Set("X-Guest-Session-ID", result.GuestSessionID)
 	}
@@ -134,7 +146,7 @@ func (h *ImageHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		Data: uploadSuccessData{
 			ID:           img.ID,
 			Fingerprint:  img.Fingerprint,
-			OriginalURL:  h.images.ObjectURL(img),
+			OriginalURL:  h.originalPublicURL(r, img),
 			Width:        intOrZero(img.Width),
 			Height:       intOrZero(img.Height),
 			Format:       formatFromMIME(img.MimeType),
@@ -143,6 +155,58 @@ func (h *ImageHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 			Deduplicated: result.Deduplicated,
 			Location:     locationPayload(img),
 			Variants:     variants,
+		},
+	})
+}
+
+// GetImageHandler returns image metadata + variants for async status polling.
+func (h *ImageHandler) GetImageHandler(w http.ResponseWriter, r *http.Request) {
+	imageID := r.PathValue("id")
+	if imageID == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_PATH", "image id is required")
+		return
+	}
+
+	img, variants, err := h.images.GetImageWithVariants(r.Context(), imageID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "IMAGE_LOOKUP_FAILED", err.Error())
+		return
+	}
+	if img == nil {
+		writeError(w, http.StatusNotFound, "IMAGE_NOT_FOUND", "image not found")
+		return
+	}
+	if !service.CanAccessImage(img, middleware.GetUserID(r.Context()), middleware.GetGuestSessionID(r.Context())) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "you do not have access to this image")
+		return
+	}
+
+	out := make([]uploadVariantData, 0, len(variants))
+	for _, variant := range variants {
+		out = append(out, uploadVariantData{
+			ID:        variant.ID,
+			Preset:    variant.PresetName,
+			URL:       h.variantPublicURL(r, img.ID, variant),
+			Width:     variant.Width,
+			Height:    variant.Height,
+			SizeBytes: variant.FileSizeBytes,
+			MimeType:  variant.MimeType,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, uploadSuccessResponse{
+		Success: true,
+		Data: uploadSuccessData{
+			ID:          img.ID,
+			Fingerprint: img.Fingerprint,
+			OriginalURL: h.originalPublicURL(r, img),
+			Width:       intOrZero(img.Width),
+			Height:      intOrZero(img.Height),
+			Format:      formatFromMIME(img.MimeType),
+			SizeBytes:   img.FileSizeBytes,
+			Status:      img.Status,
+			Location:    locationPayload(img),
+			Variants:    out,
 		},
 	})
 }
@@ -162,6 +226,20 @@ func (h *ImageHandler) ServeVariantHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	img, err := h.images.FindImageByID(r.Context(), imageID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "IMAGE_LOOKUP_FAILED", err.Error())
+		return
+	}
+	if img == nil {
+		writeError(w, http.StatusNotFound, "VARIANT_NOT_FOUND", "variant not found")
+		return
+	}
+	if !service.CanAccessImage(img, middleware.GetUserID(r.Context()), middleware.GetGuestSessionID(r.Context())) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "you do not have access to this variant")
+		return
+	}
+
 	variant, err := h.images.FindVariantByPreset(r.Context(), imageID, preset)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "VARIANT_LOOKUP_FAILED", err.Error())
@@ -175,7 +253,7 @@ func (h *ImageHandler) ServeVariantHandler(w http.ResponseWriter, r *http.Reques
 	etag := fmt.Sprintf(`W/"%s"`, variant.ID)
 	if match := r.Header.Get("If-None-Match"); match != "" && match == etag {
 		w.Header().Set("ETag", etag)
-		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -204,15 +282,37 @@ func (h *ImageHandler) ServeVariantHandler(w http.ResponseWriter, r *http.Reques
 	}
 
 	w.Header().Set("Content-Type", contentType)
-	w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filename))
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, body)
 }
 
+func (h *ImageHandler) originalPublicURL(r *http.Request, img *model.Image) string {
+	if img == nil {
+		return ""
+	}
+	if h.usePresign && img.StoragePath != "" {
+		if url, err := h.images.PresignObjectURL(r.Context(), img.StoragePath, h.presignTTL); err == nil && url != "" {
+			metrics.Default.IncPresignIssued()
+			return url
+		}
+	}
+	return h.images.ObjectURL(img)
+}
+
 func (h *ImageHandler) variantPublicURL(r *http.Request, imageID string, variant *model.ImageVariant) string {
-	if h.cdnBaseURL != "" && variant != nil && variant.StoragePath != "" {
+	if variant == nil {
+		return ""
+	}
+	if h.usePresign && variant.StoragePath != "" {
+		if url, err := h.images.PresignObjectURL(r.Context(), variant.StoragePath, h.presignTTL); err == nil && url != "" {
+			metrics.Default.IncPresignIssued()
+			return url
+		}
+	}
+	if h.cdnBaseURL != "" && variant.StoragePath != "" {
 		return h.cdnBaseURL + "/" + strings.TrimPrefix(variant.StoragePath, "/")
 	}
 

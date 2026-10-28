@@ -47,6 +47,10 @@ type AWSConfig struct {
 	AccessKeyID     string
 	SecretAccessKey string
 	S3DevBucket     string
+	// UseStaticCredentials forces long-lived keys even when IRSA is available.
+	UseStaticCredentials bool
+	PresignURLs          bool
+	PresignTTLSeconds    int
 }
 
 type AuthConfig struct {
@@ -99,10 +103,13 @@ func Load() (*Config, error) {
 			Port: getenvDefault("REDIS_PORT", "6379"),
 		},
 		AWS: AWSConfig{
-			Region:          os.Getenv("AWS_REGION"),
-			AccessKeyID:     os.Getenv("AWS_ACCESS_KEY_ID"),
-			SecretAccessKey: os.Getenv("AWS_SECRET_ACCESS_KEY"),
-			S3DevBucket:     os.Getenv("AWS_S3_DEV_BUCKET"),
+			Region:               os.Getenv("AWS_REGION"),
+			AccessKeyID:          os.Getenv("AWS_ACCESS_KEY_ID"),
+			SecretAccessKey:      os.Getenv("AWS_SECRET_ACCESS_KEY"),
+			S3DevBucket:          os.Getenv("AWS_S3_DEV_BUCKET"),
+			UseStaticCredentials: parseBoolEnv(os.Getenv("AWS_USE_STATIC_CREDENTIALS"), false),
+			PresignURLs:          parseBoolEnv(os.Getenv("AWS_S3_PRESIGN_URLS"), false),
+			PresignTTLSeconds:    getenvIntDefault("AWS_S3_PRESIGN_TTL_SECONDS", 900),
 		},
 		Auth: AuthConfig{
 			JWTSecret:      os.Getenv("JWT_SECRET"),
@@ -186,14 +193,20 @@ func (c *Config) validate() error {
 	if c.AWS.Region == "" {
 		missing = append(missing, "AWS_REGION")
 	}
-	if c.AWS.AccessKeyID == "" {
-		missing = append(missing, "AWS_ACCESS_KEY_ID")
-	}
-	if c.AWS.SecretAccessKey == "" {
-		missing = append(missing, "AWS_SECRET_ACCESS_KEY")
-	}
 	if c.AWS.S3DevBucket == "" {
 		missing = append(missing, "AWS_S3_DEV_BUCKET")
+	}
+	requireStaticAWS := c.AWS.UseStaticCredentials || c.Server.AppEnv == "development"
+	if requireStaticAWS {
+		if c.AWS.AccessKeyID == "" {
+			missing = append(missing, "AWS_ACCESS_KEY_ID")
+		}
+		if c.AWS.SecretAccessKey == "" {
+			missing = append(missing, "AWS_SECRET_ACCESS_KEY")
+		}
+	}
+	if c.AWS.PresignTTLSeconds <= 0 {
+		c.AWS.PresignTTLSeconds = 900
 	}
 
 	var errs []string
@@ -266,6 +279,32 @@ func getenvDefault(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func getenvIntDefault(key string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback
+	}
+	var n int
+	if _, err := fmt.Sscanf(raw, "%d", &n); err != nil || n <= 0 {
+		return fallback
+	}
+	return n
+}
+
+func parseBoolEnv(raw string, fallback bool) bool {
+	if strings.TrimSpace(raw) == "" {
+		return fallback
+	}
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
 }
 
 // loadDotEnvIfPresent loads key=value pairs from a nearby .env file without

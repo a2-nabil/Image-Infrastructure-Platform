@@ -38,6 +38,8 @@ export type ImageUploadFailure = {
 
 export type ImageUploadResult = ImageUploadSuccess | ImageUploadFailure;
 
+const GUEST_SESSION_KEY = "image_api_guest_session_id";
+
 // Prefer same-origin "/api/v1" so Netlify (or next.config rewrites) can proxy to Render/local Go.
 const DEFAULT_IMAGE_API_URL = "/api/v1";
 
@@ -45,6 +47,37 @@ function apiBaseURL(): string {
   return (
     process.env.NEXT_PUBLIC_IMAGE_API_URL || DEFAULT_IMAGE_API_URL
   ).replace(/\/$/, "");
+}
+
+export function getGuestSessionID(): string | null {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  try {
+    return window.localStorage.getItem(GUEST_SESSION_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setGuestSessionID(id: string): void {
+  if (typeof window === "undefined" || !id) {
+    return;
+  }
+  try {
+    window.localStorage.setItem(GUEST_SESSION_KEY, id);
+  } catch {
+    // ignore quota / private mode
+  }
+}
+
+function authHeaders(extra?: Record<string, string>): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra ?? {}) };
+  const guest = getGuestSessionID();
+  if (guest) {
+    headers["X-Guest-Session-ID"] = guest;
+  }
+  return headers;
 }
 
 function mockUpload(file: File): ImageUploadSuccess {
@@ -83,11 +116,14 @@ export async function uploadImage(file: File): Promise<ImageUploadResult> {
   try {
     const response = await fetch(`${baseUrl}/images`, {
       method: "POST",
-      headers: {
-        "X-Request-ID": requestId,
-      },
+      headers: authHeaders({ "X-Request-ID": requestId }),
       body: formData,
     });
+
+    const guestFromHeader = response.headers.get("X-Guest-Session-ID");
+    if (guestFromHeader) {
+      setGuestSessionID(guestFromHeader);
+    }
 
     const payload = (await response.json().catch(() => null)) as
       | ImageUploadResult
@@ -112,6 +148,56 @@ export async function uploadImage(file: File): Promise<ImageUploadResult> {
   } catch {
     return mockUpload(file);
   }
+}
+
+/** Poll image status until ready/failed or timeout (async worker variants). */
+export async function waitForImageReady(
+  imageId: string,
+  options?: {
+    intervalMs?: number;
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    onUpdate?: (data: ImageUploadData) => void;
+  },
+): Promise<ImageUploadData | null> {
+  const intervalMs = options?.intervalMs ?? 800;
+  const timeoutMs = options?.timeoutMs ?? 45000;
+  const baseUrl = apiBaseURL();
+  const started = Date.now();
+
+  while (Date.now() - started < timeoutMs) {
+    if (options?.signal?.aborted) {
+      return null;
+    }
+
+    try {
+      const response = await fetch(`${baseUrl}/images/${imageId}`, {
+        signal: options?.signal,
+        headers: authHeaders(),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | ImageUploadSuccess
+        | ImageUploadFailure
+        | null;
+
+      if (response.ok && payload && payload.success) {
+        const data = {
+          ...payload.data,
+          variants: payload.data.variants ?? [],
+        };
+        options?.onUpdate?.(data);
+        if (data.status === "ready" || data.status === "failed") {
+          return data;
+        }
+      }
+    } catch {
+      // keep polling through transient network blips
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  return null;
 }
 
 /** @deprecated Prefer uploadImage */
