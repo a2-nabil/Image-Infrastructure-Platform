@@ -94,7 +94,9 @@ echo
 grep -q '"deduplicated":true' "$tmpdir/dedupe.json" || { echo "FAIL: expected deduplicated=true"; exit 1; }
 
 echo "==> metrics"
-curl -sf "$API_BASE/metrics" | tee "$tmpdir/metrics.txt" | grep -q "image_api_http_requests_total" || { echo "FAIL: metrics missing"; exit 1; }
+curl -sf "$API_BASE/metrics" > "$tmpdir/metrics.txt"
+grep -q "image_api_http_requests_total" "$tmpdir/metrics.txt" || { echo "FAIL: metrics missing"; cat "$tmpdir/metrics.txt"; exit 1; }
+echo "metrics OK"
 
 code="$(curl -s -o /dev/null -w "%{http_code}" "$IDENTIFY_URL" || true)"
 if [[ "$code" != "000" ]]; then

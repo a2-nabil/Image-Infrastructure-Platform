@@ -9,21 +9,24 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@google/genai": "^2.23.0",
-    "lucide-react": "^1.47.0",
-    "next": "^16.4.0",
-    "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "@google/genai": "^2.31.0",
+    "lucide-react": "^1.63.0",
+    "next": "^16.4.3",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
   },
   "devDependencies": {
-    "@netlify/plugin-nextjs": "^5.16.0",
+    "@netlify/plugin-nextjs": "^5.16.4",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "^16.4.0",
+    "eslint-config-next": "^16.4.3",
     "tailwindcss": "^4",
     "typescript": "^5"
+  },
+  "overrides": {
+    "zod": "^4.6.7"
   }
 }

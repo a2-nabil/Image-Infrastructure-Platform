@@ -285,7 +285,7 @@ func (s *ImageService) ClaimGuestMedia(ctx context.Context, userID uuid.UUID, gu
 func (s *ImageService) findReadyByFingerprint(ctx context.Context, fingerprint string, ownerUserID *string, guestSessionID string) (*model.Image, error) {
 	// Tenant-scoped dedupe: authenticated users only hit their own ready rows;
 	// guests only hit rows for the same guest session.
-	const query = `
+	const queryByUser = `
 		SELECT id, fingerprint, original_filename, storage_path, mime_type,
 		       file_size_bytes, width, height, status, user_id, guest_session_id,
 		       expires_at, latitude, longitude, altitude, location_source,
@@ -294,10 +294,20 @@ func (s *ImageService) findReadyByFingerprint(ctx context.Context, fingerprint s
 		WHERE fingerprint = $1
 		  AND status = 'ready'
 		  AND (expires_at IS NULL OR expires_at > NOW())
-		  AND (
-		        ($2::text IS NOT NULL AND user_id = $2)
-		     OR ($2::text IS NULL AND guest_session_id = $3 AND user_id IS NULL)
-		  )
+		  AND user_id = $2::uuid
+		LIMIT 1
+	`
+	const queryByGuest = `
+		SELECT id, fingerprint, original_filename, storage_path, mime_type,
+		       file_size_bytes, width, height, status, user_id, guest_session_id,
+		       expires_at, latitude, longitude, altitude, location_source,
+		       created_at, updated_at
+		FROM images
+		WHERE fingerprint = $1
+		  AND status = 'ready'
+		  AND (expires_at IS NULL OR expires_at > NOW())
+		  AND user_id IS NULL
+		  AND guest_session_id = $2
 		LIMIT 1
 	`
 
@@ -305,7 +315,17 @@ func (s *ImageService) findReadyByFingerprint(ctx context.Context, fingerprint s
 	var userID, guestSessionIDCol, locationSource sql.NullString
 	var expiresAt sql.NullTime
 	var latitude, longitude, altitude sql.NullFloat64
-	err := s.db.QueryRowContext(ctx, query, fingerprint, nullableString(ownerUserID), guestSessionID).Scan(
+
+	var row *sql.Row
+	if ownerUserID != nil && *ownerUserID != "" {
+		row = s.db.QueryRowContext(ctx, queryByUser, fingerprint, *ownerUserID)
+	} else if guestSessionID != "" {
+		row = s.db.QueryRowContext(ctx, queryByGuest, fingerprint, guestSessionID)
+	} else {
+		return nil, nil
+	}
+
+	err := row.Scan(
 		&img.ID,
 		&img.Fingerprint,
 		&img.OriginalFilename,
