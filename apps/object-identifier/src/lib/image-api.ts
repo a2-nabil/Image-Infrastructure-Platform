@@ -71,8 +71,39 @@ export function setGuestSessionID(id: string): void {
   }
 }
 
+/** Drop guest session so the next visitor cannot claim another account's guest uploads. */
+export function clearGuestSessionID(): void {
+  if (typeof window === "undefined") {
+    return;
+  }
+  try {
+    window.localStorage.removeItem(GUEST_SESSION_KEY);
+  } catch {
+    // ignore
+  }
+}
+
 function authHeaders(extra?: Record<string, string>): Record<string, string> {
   const headers: Record<string, string> = { ...(extra ?? {}) };
+  if (typeof window !== "undefined") {
+    try {
+      const raw = window.localStorage.getItem("image_api_auth_session");
+      if (raw) {
+        const parsed = JSON.parse(raw) as {
+          accessToken?: string;
+          expiresAt?: number;
+        };
+        if (
+          parsed.accessToken &&
+          (!parsed.expiresAt || Date.now() < parsed.expiresAt)
+        ) {
+          headers.Authorization = `Bearer ${parsed.accessToken}`;
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
   const guest = getGuestSessionID();
   if (guest) {
     headers["X-Guest-Session-ID"] = guest;
@@ -99,14 +130,38 @@ function mockUpload(file: File): ImageUploadSuccess {
   };
 }
 
+export type UploadConvertOptions = {
+  /** WebP presets to generate. Default/auto: ["original"] (same dimensions). */
+  presets?: string[];
+  /** WebP quality 1–100 (default server-side 80). */
+  quality?: number;
+  /** Optional custom fit size (keeps aspect ratio inside the box). */
+  width?: number;
+  height?: number;
+};
+
 /**
  * Uploads an image to the Go Image API (`POST /images`).
  * Falls back to a mocked payload when the backend is unavailable.
  */
-export async function uploadImage(file: File): Promise<ImageUploadResult> {
+export async function uploadImage(
+  file: File,
+  options?: UploadConvertOptions,
+): Promise<ImageUploadResult> {
   const baseUrl = apiBaseURL();
   const formData = new FormData();
   formData.append("image", file);
+  const presets = options?.presets?.length ? options.presets : ["original"];
+  formData.append("presets", presets.join(","));
+  if (options?.quality && options.quality > 0) {
+    formData.append("quality", String(options.quality));
+  }
+  if (options?.width && options.width > 0) {
+    formData.append("width", String(Math.round(options.width)));
+  }
+  if (options?.height && options.height > 0) {
+    formData.append("height", String(Math.round(options.height)));
+  }
 
   const requestId =
     typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -118,6 +173,7 @@ export async function uploadImage(file: File): Promise<ImageUploadResult> {
       method: "POST",
       headers: authHeaders({ "X-Request-ID": requestId }),
       body: formData,
+      credentials: "include",
     });
 
     const guestFromHeader = response.headers.get("X-Guest-Session-ID");
@@ -174,6 +230,7 @@ export async function waitForImageReady(
       const response = await fetch(`${baseUrl}/images/${imageId}`, {
         signal: options?.signal,
         headers: authHeaders(),
+        credentials: "include",
       });
       const payload = (await response.json().catch(() => null)) as
         | ImageUploadSuccess

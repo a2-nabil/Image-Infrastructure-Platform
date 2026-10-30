@@ -19,6 +19,9 @@ func TestCORSAllowsConfiguredOrigin(t *testing.T) {
 	if got := rr.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.com" {
 		t.Fatalf("Allow-Origin=%q", got)
 	}
+	if got := rr.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("Allow-Credentials=%q, want true", got)
+	}
 }
 
 func TestCORSBlocksUnknownOrigin(t *testing.T) {

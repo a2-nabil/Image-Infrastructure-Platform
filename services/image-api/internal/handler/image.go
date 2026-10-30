@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,10 +22,19 @@ type ImageHandler struct {
 	serverBaseURL string
 	usePresign    bool
 	presignTTL    time.Duration
+	accessSigner  *service.VariantAccessSigner
+	secureCookies bool
 }
 
 // NewImageHandler constructs an ImageHandler.
-func NewImageHandler(images *service.ImageService, cdnBaseURL, serverBaseURL string, usePresign bool, presignTTLSeconds int) *ImageHandler {
+func NewImageHandler(
+	images *service.ImageService,
+	cdnBaseURL, serverBaseURL string,
+	usePresign bool,
+	presignTTLSeconds int,
+	accessSigner *service.VariantAccessSigner,
+	secureCookies bool,
+) *ImageHandler {
 	ttl := time.Duration(presignTTLSeconds) * time.Second
 	if ttl <= 0 {
 		ttl = 15 * time.Minute
@@ -35,6 +45,8 @@ func NewImageHandler(images *service.ImageService, cdnBaseURL, serverBaseURL str
 		serverBaseURL: strings.TrimRight(strings.TrimSpace(serverBaseURL), "/"),
 		usePresign:    usePresign,
 		presignTTL:    ttl,
+		accessSigner:  accessSigner,
+		secureCookies: secureCookies,
 	}
 }
 
@@ -102,6 +114,29 @@ func (h *ImageHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	presets := splitCSV(r.FormValue("presets"))
+	quality := 0
+	if rawQ := strings.TrimSpace(r.FormValue("quality")); rawQ != "" {
+		if n, err := strconv.Atoi(rawQ); err == nil {
+			quality = n
+		}
+	}
+	customWidth := 0
+	customHeight := 0
+	if rawW := strings.TrimSpace(r.FormValue("width")); rawW != "" {
+		if n, err := strconv.Atoi(rawW); err == nil {
+			customWidth = n
+		}
+	}
+	if rawH := strings.TrimSpace(r.FormValue("height")); rawH != "" {
+		if n, err := strconv.Atoi(rawH); err == nil {
+			customHeight = n
+		}
+	}
+	if customWidth > 0 || customHeight > 0 {
+		presets = append(presets, "custom")
+	}
+
 	result, err := h.images.ProcessAndUpload(
 		r.Context(),
 		header,
@@ -109,6 +144,12 @@ func (h *ImageHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		middleware.GetGuestSessionID(r.Context()),
 		service.ParseOptionalFloat(r.FormValue("latitude")),
 		service.ParseOptionalFloat(r.FormValue("longitude")),
+		service.ConvertOptions{
+			Presets:      presets,
+			Quality:      quality,
+			CustomWidth:  customWidth,
+			CustomHeight: customHeight,
+		},
 	)
 	if err != nil {
 		status, code := mapUploadError(err)
@@ -120,6 +161,7 @@ func (h *ImageHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 
 	if result.GuestSessionID != "" {
 		w.Header().Set("X-Guest-Session-ID", result.GuestSessionID)
+		h.setGuestSessionCookie(w, result.GuestSessionID)
 	}
 
 	img := result.Image
@@ -128,7 +170,7 @@ func (h *ImageHandler) UploadHandler(w http.ResponseWriter, r *http.Request) {
 		variants = append(variants, uploadVariantData{
 			ID:        variant.ID,
 			Preset:    variant.PresetName,
-			URL:       h.variantPublicURL(r, img.ID, variant),
+			URL:       h.variantPublicURL(r, img, variant),
 			Width:     variant.Width,
 			Height:    variant.Height,
 			SizeBytes: variant.FileSizeBytes,
@@ -186,7 +228,7 @@ func (h *ImageHandler) GetImageHandler(w http.ResponseWriter, r *http.Request) {
 		out = append(out, uploadVariantData{
 			ID:        variant.ID,
 			Preset:    variant.PresetName,
-			URL:       h.variantPublicURL(r, img.ID, variant),
+			URL:       h.variantPublicURL(r, img, variant),
 			Width:     variant.Width,
 			Height:    variant.Height,
 			SizeBytes: variant.FileSizeBytes,
@@ -235,7 +277,7 @@ func (h *ImageHandler) ServeVariantHandler(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusNotFound, "VARIANT_NOT_FOUND", "variant not found")
 		return
 	}
-	if !service.CanAccessImage(img, middleware.GetUserID(r.Context()), middleware.GetGuestSessionID(r.Context())) {
+	if !h.canAccessVariant(r, img) {
 		writeError(w, http.StatusForbidden, "FORBIDDEN", "you do not have access to this variant")
 		return
 	}
@@ -275,16 +317,17 @@ func (h *ImageHandler) ServeVariantHandler(w http.ResponseWriter, r *http.Reques
 		contentType = "image/webp"
 	}
 
-	filename := preset + ".webp"
-	if strings.HasSuffix(strings.ToLower(variant.StoragePath), ".jpg") ||
-		strings.HasSuffix(strings.ToLower(variant.StoragePath), ".jpeg") {
-		filename = preset + ".jpg"
+	filename := webpDownloadName(img.OriginalFilename, variant.Width, variant.Height, intOrZero(img.Width), intOrZero(img.Height))
+
+	disposition := "inline"
+	if strings.EqualFold(r.URL.Query().Get("download"), "1") {
+		disposition = "attachment"
 	}
 
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Cache-Control", "private, max-age=31536000, immutable")
 	w.Header().Set("ETag", etag)
-	w.Header().Set("Content-Disposition", fmt.Sprintf("inline; filename=%q", filename))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("%s; filename=%q", disposition, filename))
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, body)
 }
@@ -293,34 +336,144 @@ func (h *ImageHandler) originalPublicURL(r *http.Request, img *model.Image) stri
 	if img == nil {
 		return ""
 	}
-	if h.usePresign && img.StoragePath != "" {
-		if url, err := h.images.PresignObjectURL(r.Context(), img.StoragePath, h.presignTTL); err == nil && url != "" {
-			metrics.Default.IncPresignIssued()
-			return url
-		}
+	// Always expose the API proxy path (not a raw S3 URL) so browsers/gallery use /api/v1.
+	path := fmt.Sprintf("/api/v1/images/%s/original", img.ID)
+	if q := h.accessQuery(img); q != "" {
+		path += q
 	}
-	return h.images.ObjectURL(img)
-}
-
-func (h *ImageHandler) variantPublicURL(r *http.Request, imageID string, variant *model.ImageVariant) string {
-	if variant == nil {
-		return ""
-	}
-	if h.usePresign && variant.StoragePath != "" {
-		if url, err := h.images.PresignObjectURL(r.Context(), variant.StoragePath, h.presignTTL); err == nil && url != "" {
-			metrics.Default.IncPresignIssued()
-			return url
-		}
-	}
-	if h.cdnBaseURL != "" && variant.StoragePath != "" {
-		return h.cdnBaseURL + "/" + strings.TrimPrefix(variant.StoragePath, "/")
-	}
-
-	path := fmt.Sprintf("/api/v1/images/%s/variants/%s", imageID, variant.PresetName)
 	if h.serverBaseURL != "" {
 		return h.serverBaseURL + path
 	}
 	return absoluteURL(r, path)
+}
+
+// ServeOriginalHandler streams the original upload from S3 via the API proxy.
+func (h *ImageHandler) ServeOriginalHandler(w http.ResponseWriter, r *http.Request) {
+	imageID := r.PathValue("id")
+	if imageID == "" {
+		writeError(w, http.StatusBadRequest, "INVALID_PATH", "image id is required")
+		return
+	}
+
+	img, err := h.images.FindImageByID(r.Context(), imageID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "IMAGE_LOOKUP_FAILED", err.Error())
+		return
+	}
+	if img == nil {
+		writeError(w, http.StatusNotFound, "IMAGE_NOT_FOUND", "image not found")
+		return
+	}
+	if !h.canAccessVariant(r, img) {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "you do not have access to this image")
+		return
+	}
+
+	etag := fmt.Sprintf(`W/"original-%s-%d"`, img.ID, img.UpdatedAt.Unix())
+	if match := r.Header.Get("If-None-Match"); match != "" && match == etag {
+		w.Header().Set("ETag", etag)
+		w.Header().Set("Cache-Control", "private, max-age=3600")
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+
+	body, contentType, err := h.images.OpenOriginalObject(r.Context(), img)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "ORIGINAL_FETCH_FAILED", err.Error())
+		return
+	}
+	defer body.Close()
+
+	if contentType == "" || contentType == "application/octet-stream" {
+		contentType = img.MimeType
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	filename := img.OriginalFilename
+	if filename == "" {
+		filename = "original"
+	}
+
+	disposition := "inline"
+	if strings.EqualFold(r.URL.Query().Get("download"), "1") {
+		disposition = "attachment"
+	}
+
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("%s; filename=%q", disposition, filename))
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, body)
+}
+
+func (h *ImageHandler) variantPublicURL(r *http.Request, img *model.Image, variant *model.ImageVariant) string {
+	if variant == nil || img == nil {
+		return ""
+	}
+	// Never expose S3/presigned/CDN object URLs to clients — always API proxy paths.
+	path := fmt.Sprintf("/api/v1/images/%s/variants/%s", img.ID, variant.PresetName)
+	if q := h.accessQuery(img); q != "" {
+		path += q
+	}
+	if h.serverBaseURL != "" {
+		return h.serverBaseURL + path
+	}
+	return absoluteURL(r, path)
+}
+
+func (h *ImageHandler) accessQuery(img *model.Image) string {
+	if h == nil || h.accessSigner == nil || !h.accessSigner.Enabled() || img == nil {
+		return ""
+	}
+	tenant := service.ImageTenantKey(img)
+	if tenant == "" {
+		return ""
+	}
+	return h.accessSigner.Query(img.ID, tenant)
+}
+
+func (h *ImageHandler) canAccessVariant(r *http.Request, img *model.Image) bool {
+	if service.CanAccessImage(img, middleware.GetUserID(r.Context()), middleware.GetGuestSessionID(r.Context())) {
+		return true
+	}
+	// Capability URL: ?exp=&sig= lets <img src> / downloads work without custom headers.
+	// Signature is tenant-bound so another account's leaked URL cannot authorize this object
+	// unless it was issued for the same owner scope.
+	if h.accessSigner == nil || !h.accessSigner.Enabled() || img == nil {
+		return false
+	}
+	tenant := service.ImageTenantKey(img)
+	if tenant == "" {
+		return false
+	}
+	expRaw := strings.TrimSpace(r.URL.Query().Get("exp"))
+	sig := strings.TrimSpace(r.URL.Query().Get("sig"))
+	if expRaw == "" || sig == "" {
+		return false
+	}
+	exp, err := strconv.ParseInt(expRaw, 10, 64)
+	if err != nil {
+		return false
+	}
+	return h.accessSigner.Verify(img.ID, tenant, sig, exp)
+}
+
+func (h *ImageHandler) setGuestSessionCookie(w http.ResponseWriter, guestSessionID string) {
+	if guestSessionID == "" {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     middleware.GuestSessionCookie,
+		Value:    guestSessionID,
+		Path:     "/",
+		MaxAge:   int((72 * time.Hour).Seconds()),
+		HttpOnly: true,
+		Secure:   h.secureCookies,
+		SameSite: http.SameSiteLaxMode,
+	})
 }
 
 func absoluteURL(r *http.Request, path string) string {
@@ -392,6 +545,42 @@ func locationPayload(img *model.Image) *uploadLocationData {
 		Altitude:  img.Altitude,
 		Source:    source,
 	}
+}
+
+func splitCSV(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func fileBaseName(filename string) string {
+	name := strings.TrimSpace(filename)
+	if name == "" {
+		return "image"
+	}
+	if i := strings.LastIndex(name, "."); i > 0 {
+		return name[:i]
+	}
+	return name
+}
+
+// webpDownloadName uses the uploaded basename. Appends -WxH only when dimensions change.
+func webpDownloadName(originalFilename string, width, height, sourceW, sourceH int) string {
+	base := fileBaseName(originalFilename)
+	if width > 0 && height > 0 && sourceW > 0 && sourceH > 0 &&
+		(width != sourceW || height != sourceH) {
+		return fmt.Sprintf("%s-%dx%d.webp", base, width, height)
+	}
+	return base + ".webp"
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {

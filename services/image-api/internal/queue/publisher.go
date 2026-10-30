@@ -7,10 +7,22 @@ type ServicePublisher struct {
 	Queue *VariantQueue
 }
 
-func (p ServicePublisher) EnqueueVariantJob(ctx context.Context, imageID, storagePath string, userID *string) error {
+func (p ServicePublisher) EnqueueVariantJob(
+	ctx context.Context,
+	imageID, storagePath string,
+	userID *string,
+	presets []string,
+	quality, customWidth, customHeight int,
+	mediaKind string,
+) error {
 	job := VariantJob{
-		ImageID:     imageID,
-		StoragePath: storagePath,
+		ImageID:      imageID,
+		StoragePath:  storagePath,
+		MediaKind:    mediaKind,
+		Presets:      presets,
+		Quality:      quality,
+		CustomWidth:  customWidth,
+		CustomHeight: customHeight,
 	}
 	if userID != nil {
 		job.UserID = *userID

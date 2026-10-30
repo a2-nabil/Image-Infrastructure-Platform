@@ -25,20 +25,29 @@ func CORSMiddleware(allowedOrigins []string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			reqOrigin := r.Header.Get("Origin")
+			reflected := false
 			if allowAll {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 			} else if reqOrigin != "" {
 				if _, ok := set[reqOrigin]; ok {
 					w.Header().Set("Access-Control-Allow-Origin", reqOrigin)
 					w.Header().Set("Vary", "Origin")
+					reflected = true
 				}
 			} else if len(origins) == 1 {
 				// Non-browser clients: still advertise the single configured origin.
 				w.Header().Set("Access-Control-Allow-Origin", origins[0])
 				w.Header().Set("Vary", "Origin")
+				reflected = true
 			}
 
-			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			// Required when the browser uses fetch(..., { credentials: "include" }).
+			// Must never be combined with Allow-Origin: *.
+			if reflected && !allowAll {
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+			}
+
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 			w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Request-ID, Authorization, X-Guest-Session-ID")
 			w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID, X-Guest-Session-ID, X-RateLimit-Limit, X-RateLimit-Remaining, X-RateLimit-Reset, Retry-After")
 

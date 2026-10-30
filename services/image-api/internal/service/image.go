@@ -45,14 +45,28 @@ type UploadResult struct {
 
 // VariantJobPublisher publishes async variant-generation jobs.
 type VariantJobPublisher interface {
-	EnqueueVariantJob(ctx context.Context, imageID, storagePath string, userID *string) error
+	EnqueueVariantJob(ctx context.Context, imageID, storagePath string, userID *string, presets []string, quality, customWidth, customHeight int, mediaKind string) error
+}
+
+// ConvertOptions controls which WebP variants the worker generates.
+type ConvertOptions struct {
+	Presets      []string
+	Quality      int
+	CustomWidth  int
+	CustomHeight int
+}
+
+// ImageIdentifyCleanup removes AI identification data when an image is purged.
+type ImageIdentifyCleanup interface {
+	DeleteForImage(ctx context.Context, imageID string) error
 }
 
 // ImageService handles upload validation, S3 ingestion, and persistence.
 type ImageService struct {
-	db    *sql.DB
-	s3    *storage.S3Client
-	queue VariantJobPublisher
+	db       *sql.DB
+	s3       *storage.S3Client
+	queue    VariantJobPublisher
+	identify ImageIdentifyCleanup
 }
 
 // NewImageService constructs an ImageService.
@@ -67,9 +81,24 @@ func (s *ImageService) SetVariantQueue(q VariantJobPublisher) {
 	}
 }
 
+// SetIdentifyCleanup wires AI row + Redis cleanup on permanent image delete.
+func (s *ImageService) SetIdentifyCleanup(c ImageIdentifyCleanup) {
+	if s != nil {
+		s.identify = c
+	}
+}
+
+func (s *ImageService) cleanupIdentification(ctx context.Context, imageID string) {
+	if s == nil || s.identify == nil || imageID == "" {
+		return
+	}
+	_ = s.identify.DeleteForImage(ctx, imageID)
+}
+
 // ProcessAndUpload validates the multipart image, uploads raw bytes to S3,
 // persists metadata as processing, and enqueues async variant generation.
-func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipart.FileHeader, authUserID *uuid.UUID, guestSessionID string, clientLat, clientLng *float64) (*UploadResult, error) {
+// convert controls WebP presets (default: original-size only) and quality.
+func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipart.FileHeader, authUserID *uuid.UUID, guestSessionID string, clientLat, clientLng *float64, convert ConvertOptions) (*UploadResult, error) {
 	if s == nil || s.db == nil || s.s3 == nil {
 		return nil, fmt.Errorf("image service is not initialized")
 	}
@@ -122,7 +151,7 @@ func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipa
 		guestSessionID = ""
 	}
 
-	existing, err := s.findReadyByFingerprint(ctx, fingerprint, userID, guestSessionID)
+	existing, err := s.findReadyByFingerprint(ctx, fingerprint, userID, guestSessionID, model.LibraryScopeTools)
 	if err != nil {
 		return nil, fmt.Errorf("lookup fingerprint: %w", err)
 	}
@@ -211,9 +240,21 @@ func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipa
 		return nil, fmt.Errorf("persist image metadata: %w", err)
 	}
 
+	convert.Presets = NormalizeVariantPresets(convert.Presets)
+
 	// Event-driven path: enqueue variant work and return immediately.
 	if s.queue != nil {
-		if err := s.queue.EnqueueVariantJob(ctx, img.ID, storagePath, userID); err != nil {
+		if err := s.queue.EnqueueVariantJob(
+			ctx,
+			img.ID,
+			storagePath,
+			userID,
+			convert.Presets,
+			convert.Quality,
+			convert.CustomWidth,
+			convert.CustomHeight,
+			model.MediaKindImage,
+		); err != nil {
 			_ = s.updateImageStatus(ctx, img.ID, model.ImageStatusFailed)
 			return nil, fmt.Errorf("enqueue variant job: %w", err)
 		}
@@ -226,7 +267,16 @@ func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipa
 	}
 
 	// Fallback synchronous processing (tests / no queue wired).
-	variants, err := s.GenerateVariants(ctx, img.ID, userID, bytes.NewReader(payload))
+	variants, err := s.GenerateVariants(
+		ctx,
+		img.ID,
+		userID,
+		bytes.NewReader(payload),
+		convert.Presets,
+		convert.Quality,
+		convert.CustomWidth,
+		convert.CustomHeight,
+	)
 	if err != nil {
 		_ = s.updateImageStatus(ctx, img.ID, model.ImageStatusFailed)
 		return nil, fmt.Errorf("generate variants: %w", err)
@@ -248,43 +298,421 @@ func (s *ImageService) ProcessAndUpload(ctx context.Context, fileHeader *multipa
 	}, nil
 }
 
+// ClaimGuestResult summarizes guest → user ownership transfer.
+type ClaimGuestResult struct {
+	Claimed int // newly owned guest rows
+	Merged  int // guest rows folded into an existing user fingerprint
+}
+
+type guestClaimRow struct {
+	ID          string
+	Fingerprint string
+	StoragePath string
+}
+
 // ClaimGuestMedia promotes ephemeral guest images to permanent user assets.
-func (s *ImageService) ClaimGuestMedia(ctx context.Context, userID uuid.UUID, guestSessionID string) (int, error) {
+// If the user already owns the same fingerprint (e.g. uploaded while logged in
+// on Converter, then again as guest on Identify), the guest copy is merged and
+// removed instead of creating a duplicate gallery item.
+func (s *ImageService) ClaimGuestMedia(ctx context.Context, userID uuid.UUID, guestSessionID string) (*ClaimGuestResult, error) {
 	if s == nil || s.db == nil {
-		return 0, fmt.Errorf("image service is not initialized")
+		return nil, fmt.Errorf("image service is not initialized")
 	}
 	if guestSessionID == "" {
-		return 0, fmt.Errorf("guest_session_id is required")
+		return nil, fmt.Errorf("guest_session_id is required")
 	}
 
+	guests, err := s.listClaimableGuestImages(ctx, guestSessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	out := &ClaimGuestResult{}
+	uid := userID.String()
+
+	for _, guest := range guests {
+		keeperID, err := s.findOwnedImageIDByFingerprint(ctx, uid, guest.Fingerprint)
+		if err != nil {
+			return out, fmt.Errorf("lookup owned fingerprint: %w", err)
+		}
+		if keeperID != "" {
+			if err := s.mergeGuestImageIntoOwned(ctx, guest, keeperID, uid); err != nil {
+				return out, fmt.Errorf("merge guest image %s: %w", guest.ID, err)
+			}
+			out.Merged++
+			continue
+		}
+
+		const claimSQL = `
+			UPDATE images
+			SET user_id = $1::uuid,
+			    expires_at = NULL,
+			    guest_session_id = NULL,
+			    updated_at = NOW()
+			WHERE id = $2::uuid
+			  AND guest_session_id = $3
+			  AND user_id IS NULL
+			  AND expires_at > NOW()
+		`
+		res, err := s.db.ExecContext(ctx, claimSQL, uid, guest.ID, guestSessionID)
+		if err != nil {
+			return out, fmt.Errorf("claim guest image %s: %w", guest.ID, err)
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return out, err
+		}
+		if n > 0 {
+			out.Claimed++
+		}
+	}
+
+	// Fold any pre-existing same-fingerprint duplicates under this user
+	// (e.g. claim bugs from earlier builds).
+	mergedOwned, err := s.mergeDuplicateOwnedFingerprints(ctx, uid)
+	if err != nil {
+		return out, fmt.Errorf("reconcile owned duplicates: %w", err)
+	}
+	out.Merged += mergedOwned
+
+	return out, nil
+}
+
+func (s *ImageService) listClaimableGuestImages(ctx context.Context, guestSessionID string) ([]guestClaimRow, error) {
+	const q = `
+		SELECT id, fingerprint, storage_path
+		FROM images
+		WHERE guest_session_id = $1
+		  AND user_id IS NULL
+		  AND expires_at IS NOT NULL
+		  AND expires_at > NOW()
+		ORDER BY created_at ASC
+	`
+	rows, err := s.db.QueryContext(ctx, q, guestSessionID)
+	if err != nil {
+		return nil, fmt.Errorf("list claimable guest images: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]guestClaimRow, 0)
+	for rows.Next() {
+		var row guestClaimRow
+		if err := rows.Scan(&row.ID, &row.Fingerprint, &row.StoragePath); err != nil {
+			return nil, fmt.Errorf("scan claimable guest image: %w", err)
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func (s *ImageService) findOwnedImageIDByFingerprint(ctx context.Context, userID, fingerprint string) (string, error) {
+	const q = `
+		SELECT id
+		FROM images
+		WHERE fingerprint = $1
+		  AND user_id = $2::uuid
+		ORDER BY
+		  CASE WHEN trashed_at IS NULL THEN 0 ELSE 1 END,
+		  CASE WHEN status = 'ready' THEN 0 ELSE 1 END,
+		  created_at ASC
+		LIMIT 1
+	`
+	var id string
+	err := s.db.QueryRowContext(ctx, q, fingerprint, userID).Scan(&id)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// mergeGuestImageIntoOwned moves missing variants / identify onto the keeper,
+// then deletes the guest image (and its S3 objects).
+func (s *ImageService) mergeGuestImageIntoOwned(ctx context.Context, guest guestClaimRow, keeperID, userID string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("begin claim transaction: %w", err)
+		return fmt.Errorf("begin merge tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	const updateSQL = `
-		UPDATE images
-		SET user_id = $1, expires_at = NULL, guest_session_id = NULL, updated_at = NOW()
-		WHERE guest_session_id = $2 AND expires_at > NOW()
+	// Move presets the keeper does not already have.
+	const moveVariantsSQL = `
+		UPDATE image_variants AS guest
+		SET image_id = $1::uuid
+		WHERE guest.image_id = $2::uuid
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM image_variants keeper
+			WHERE keeper.image_id = $1::uuid
+			  AND keeper.preset_name = guest.preset_name
+		  )
 	`
-	res, err := tx.ExecContext(ctx, updateSQL, userID.String(), guestSessionID)
-	if err != nil {
-		return 0, fmt.Errorf("claim guest media: %w", err)
+	if _, err := tx.ExecContext(ctx, moveVariantsSQL, keeperID, guest.ID); err != nil {
+		return fmt.Errorf("move missing variants: %w", err)
 	}
-	claimed, err := res.RowsAffected()
+
+	// Attach guest identify result to keeper when keeper has none.
+	const moveIdentifySQL = `
+		UPDATE image_identifications AS guest
+		SET image_id = $1::uuid,
+		    user_id = $3::uuid,
+		    updated_at = NOW()
+		WHERE guest.image_id = $2::uuid
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM image_identifications keeper
+			WHERE keeper.image_id = $1::uuid
+		  )
+	`
+	if _, err := tx.ExecContext(ctx, moveIdentifySQL, keeperID, guest.ID, userID); err != nil {
+		return fmt.Errorf("move identify result: %w", err)
+	}
+
+	// Collect remaining guest variant keys (not moved) for S3 cleanup.
+	remainingVariants, err := s.listVariantsTx(ctx, tx, guest.ID)
 	if err != nil {
-		return 0, fmt.Errorf("read claimed count: %w", err)
+		return err
+	}
+
+	const deleteGuestSQL = `
+		DELETE FROM images
+		WHERE id = $1::uuid
+		  AND user_id IS NULL
+	`
+	res, err := tx.ExecContext(ctx, deleteGuestSQL, guest.ID)
+	if err != nil {
+		return fmt.Errorf("delete guest image row: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("guest image %s was not deleted", guest.ID)
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit claim transaction: %w", err)
+		return fmt.Errorf("commit merge tx: %w", err)
 	}
-	return int(claimed), nil
+
+	keys := make([]string, 0, 1+len(remainingVariants))
+	if guest.StoragePath != "" {
+		keys = append(keys, guest.StoragePath)
+	}
+	for _, v := range remainingVariants {
+		if v != nil && v.StoragePath != "" {
+			keys = append(keys, v.StoragePath)
+		}
+	}
+	if s.s3 != nil {
+		for _, key := range keys {
+			_ = s.s3.DeleteObject(ctx, key)
+		}
+	}
+	return nil
 }
 
-func (s *ImageService) findReadyByFingerprint(ctx context.Context, fingerprint string, ownerUserID *string, guestSessionID string) (*model.Image, error) {
+func (s *ImageService) listVariantsTx(ctx context.Context, tx *sql.Tx, imageID string) ([]*model.ImageVariant, error) {
+	const q = `
+		SELECT id, image_id, preset_name, storage_path, mime_type,
+		       file_size_bytes, width, height, created_at
+		FROM image_variants
+		WHERE image_id = $1
+		ORDER BY created_at ASC
+	`
+	rows, err := tx.QueryContext(ctx, q, imageID)
+	if err != nil {
+		return nil, fmt.Errorf("list variants in tx: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]*model.ImageVariant, 0)
+	for rows.Next() {
+		v := &model.ImageVariant{}
+		if err := rows.Scan(
+			&v.ID,
+			&v.ImageID,
+			&v.PresetName,
+			&v.StoragePath,
+			&v.MimeType,
+			&v.FileSizeBytes,
+			&v.Width,
+			&v.Height,
+			&v.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// mergeDuplicateOwnedFingerprints collapses same-fingerprint rows for one user.
+// Keeps the oldest ready/non-trashed row when possible.
+func (s *ImageService) mergeDuplicateOwnedFingerprints(ctx context.Context, userID string) (int, error) {
+	const dupSQL = `
+		SELECT fingerprint, COALESCE(library_scope, 'tools') AS library_scope
+		FROM images
+		WHERE user_id = $1::uuid
+		GROUP BY fingerprint, COALESCE(library_scope, 'tools')
+		HAVING COUNT(*) > 1
+	`
+	rows, err := s.db.QueryContext(ctx, dupSQL, userID)
+	if err != nil {
+		return 0, fmt.Errorf("list duplicate fingerprints: %w", err)
+	}
+	defer rows.Close()
+
+	type dupKey struct {
+		Fingerprint  string
+		LibraryScope string
+	}
+	dups := make([]dupKey, 0)
+	for rows.Next() {
+		var key dupKey
+		if err := rows.Scan(&key.Fingerprint, &key.LibraryScope); err != nil {
+			return 0, err
+		}
+		dups = append(dups, key)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	merged := 0
+	for _, key := range dups {
+		fp := key.Fingerprint
+		const idsSQL = `
+			SELECT id, storage_path
+			FROM images
+			WHERE user_id = $1::uuid
+			  AND fingerprint = $2
+			  AND COALESCE(library_scope, 'tools') = $3
+			ORDER BY
+			  CASE WHEN trashed_at IS NULL THEN 0 ELSE 1 END,
+			  CASE WHEN status = 'ready' THEN 0 ELSE 1 END,
+			  created_at ASC
+		`
+		idRows, err := s.db.QueryContext(ctx, idsSQL, userID, fp, key.LibraryScope)
+		if err != nil {
+			return merged, err
+		}
+		type ownedRow struct {
+			ID          string
+			StoragePath string
+		}
+		owned := make([]ownedRow, 0)
+		for idRows.Next() {
+			var row ownedRow
+			if err := idRows.Scan(&row.ID, &row.StoragePath); err != nil {
+				idRows.Close()
+				return merged, err
+			}
+			owned = append(owned, row)
+		}
+		idRows.Close()
+		if err := idRows.Err(); err != nil {
+			return merged, err
+		}
+		if len(owned) < 2 {
+			continue
+		}
+		keeper := owned[0]
+		for _, dup := range owned[1:] {
+			if err := s.mergeOwnedDuplicateIntoKeeper(ctx, dup.ID, dup.StoragePath, keeper.ID, userID); err != nil {
+				return merged, err
+			}
+			merged++
+		}
+	}
+	return merged, nil
+}
+
+func (s *ImageService) mergeOwnedDuplicateIntoKeeper(ctx context.Context, dupID, dupStoragePath, keeperID, userID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	const moveVariantsSQL = `
+		UPDATE image_variants AS dup
+		SET image_id = $1::uuid
+		WHERE dup.image_id = $2::uuid
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM image_variants keeper
+			WHERE keeper.image_id = $1::uuid
+			  AND keeper.preset_name = dup.preset_name
+		  )
+	`
+	if _, err := tx.ExecContext(ctx, moveVariantsSQL, keeperID, dupID); err != nil {
+		return fmt.Errorf("move owned duplicate variants: %w", err)
+	}
+
+	const moveIdentifySQL = `
+		UPDATE image_identifications AS dup
+		SET image_id = $1::uuid,
+		    user_id = $3::uuid,
+		    updated_at = NOW()
+		WHERE dup.image_id = $2::uuid
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM image_identifications keeper
+			WHERE keeper.image_id = $1::uuid
+		  )
+	`
+	if _, err := tx.ExecContext(ctx, moveIdentifySQL, keeperID, dupID, userID); err != nil {
+		return fmt.Errorf("move owned duplicate identify: %w", err)
+	}
+
+	remaining, err := s.listVariantsTx(ctx, tx, dupID)
+	if err != nil {
+		return err
+	}
+
+	const deleteSQL = `
+		DELETE FROM images
+		WHERE id = $1::uuid
+		  AND user_id = $2::uuid
+	`
+	res, err := tx.ExecContext(ctx, deleteSQL, dupID, userID)
+	if err != nil {
+		return fmt.Errorf("delete owned duplicate: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("owned duplicate %s was not deleted", dupID)
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	keys := make([]string, 0, 1+len(remaining))
+	if dupStoragePath != "" {
+		keys = append(keys, dupStoragePath)
+	}
+	for _, v := range remaining {
+		if v != nil && v.StoragePath != "" {
+			keys = append(keys, v.StoragePath)
+		}
+	}
+	if s.s3 != nil {
+		for _, key := range keys {
+			_ = s.s3.DeleteObject(ctx, key)
+		}
+	}
+	return nil
+}
+
+func (s *ImageService) findReadyByFingerprint(ctx context.Context, fingerprint string, ownerUserID *string, guestSessionID, libraryScope string) (*model.Image, error) {
 	// Tenant-scoped dedupe: authenticated users only hit their own ready rows;
-	// guests only hit rows for the same guest session.
+	// guests only hit rows for the same guest session. Library scope keeps
+	// Gallery media isolated from Converter / Identify / Dashboard.
+	if libraryScope != model.LibraryScopeGallery {
+		libraryScope = model.LibraryScopeTools
+	}
 	const queryByUser = `
 		SELECT id, fingerprint, original_filename, storage_path, mime_type,
 		       file_size_bytes, width, height, status, user_id, guest_session_id,
@@ -295,6 +723,7 @@ func (s *ImageService) findReadyByFingerprint(ctx context.Context, fingerprint s
 		  AND status = 'ready'
 		  AND (expires_at IS NULL OR expires_at > NOW())
 		  AND user_id = $2::uuid
+		  AND COALESCE(library_scope, 'tools') = $3
 		LIMIT 1
 	`
 	const queryByGuest = `
@@ -308,6 +737,7 @@ func (s *ImageService) findReadyByFingerprint(ctx context.Context, fingerprint s
 		  AND (expires_at IS NULL OR expires_at > NOW())
 		  AND user_id IS NULL
 		  AND guest_session_id = $2
+		  AND COALESCE(library_scope, 'tools') = $3
 		LIMIT 1
 	`
 
@@ -318,9 +748,9 @@ func (s *ImageService) findReadyByFingerprint(ctx context.Context, fingerprint s
 
 	var row *sql.Row
 	if ownerUserID != nil && *ownerUserID != "" {
-		row = s.db.QueryRowContext(ctx, queryByUser, fingerprint, *ownerUserID)
+		row = s.db.QueryRowContext(ctx, queryByUser, fingerprint, *ownerUserID, libraryScope)
 	} else if guestSessionID != "" {
-		row = s.db.QueryRowContext(ctx, queryByGuest, fingerprint, guestSessionID)
+		row = s.db.QueryRowContext(ctx, queryByGuest, fingerprint, guestSessionID, libraryScope)
 	} else {
 		return nil, nil
 	}
@@ -461,6 +891,212 @@ func (s *ImageService) GetImageWithVariants(ctx context.Context, imageID string)
 		return nil, nil, err
 	}
 	return img, variants, nil
+}
+
+// UserImageBundle is an owned image plus its variants for dashboard listing.
+type UserImageBundle struct {
+	Image    *model.Image
+	Variants []*model.ImageVariant
+}
+
+// ListImagesForUser returns non-expired images owned by the user (newest first),
+// plus the total matching count for pagination.
+// When trashOnly is true, only trashed library items are returned.
+// ListImagesFilter scopes gallery listing for authenticated users.
+type ListImagesFilter struct {
+	TrashOnly    bool
+	AlbumID      *uuid.UUID
+	MediaKind    string // image | video | empty = all
+	LibraryScope string // tools | gallery (default tools)
+}
+
+func (s *ImageService) ListImagesForUser(ctx context.Context, userID uuid.UUID, limit, offset int, trashOnly bool) ([]UserImageBundle, int, error) {
+	return s.ListImagesForUserFiltered(ctx, userID, limit, offset, ListImagesFilter{TrashOnly: trashOnly})
+}
+
+func (s *ImageService) ListImagesForUserFiltered(ctx context.Context, userID uuid.UUID, limit, offset int, filter ListImagesFilter) ([]UserImageBundle, int, error) {
+	// Heal fingerprint duplicates (guest claim bugs / cross-uploader reuploads).
+	if offset == 0 && !filter.TrashOnly && filter.AlbumID == nil {
+		if _, err := s.mergeDuplicateOwnedFingerprints(ctx, userID.String()); err != nil {
+			return nil, 0, fmt.Errorf("reconcile owned duplicates: %w", err)
+		}
+	}
+
+	if s == nil || s.db == nil {
+		return nil, 0, fmt.Errorf("image service is not initialized")
+	}
+	if limit <= 0 || limit > 200 {
+		limit = 24
+	}
+	if offset < 0 {
+		offset = 0
+	}
+
+	trashClause := "AND i.trashed_at IS NULL"
+	if filter.TrashOnly {
+		trashClause = "AND i.trashed_at IS NOT NULL"
+	}
+
+	albumJoin := ""
+	albumClause := ""
+	args := []any{userID.String()}
+	argN := 2
+	if filter.AlbumID != nil {
+		owned, err := s.userOwnsAlbum(ctx, userID, *filter.AlbumID)
+		if err != nil {
+			return nil, 0, err
+		}
+		if !owned {
+			return nil, 0, fmt.Errorf("album not found")
+		}
+		albumJoin = "INNER JOIN album_items ai ON ai.image_id = i.id"
+		albumClause = fmt.Sprintf("AND ai.album_id = $%d::uuid", argN)
+		args = append(args, filter.AlbumID.String())
+		argN++
+	}
+
+	mediaClause := ""
+	if filter.MediaKind == model.MediaKindImage || filter.MediaKind == model.MediaKindVideo {
+		mediaClause = fmt.Sprintf("AND i.media_kind = $%d", argN)
+		args = append(args, filter.MediaKind)
+		argN++
+	}
+
+	scope := filter.LibraryScope
+	if scope != model.LibraryScopeGallery {
+		scope = model.LibraryScopeTools
+	}
+	scopeClause := fmt.Sprintf("AND COALESCE(i.library_scope, 'tools') = $%d", argN)
+	args = append(args, scope)
+	argN++
+
+	countQuery := `
+		SELECT COUNT(*)
+		FROM images i
+		` + albumJoin + `
+		WHERE i.user_id = $1::uuid
+		  AND (i.expires_at IS NULL OR i.expires_at > NOW())
+		  ` + trashClause + `
+		  ` + albumClause + `
+		  ` + mediaClause + `
+		  ` + scopeClause
+	var total int
+	if err := s.db.QueryRowContext(ctx, countQuery, args...).Scan(&total); err != nil {
+		return nil, 0, fmt.Errorf("count user images: %w", err)
+	}
+
+	orderBy := "i.created_at DESC"
+	if filter.TrashOnly {
+		orderBy = "i.trashed_at DESC NULLS LAST, i.created_at DESC"
+	}
+
+	limitPlaceholder := fmt.Sprintf("$%d", argN)
+	offsetPlaceholder := fmt.Sprintf("$%d", argN+1)
+	queryArgs := append(append([]any{}, args...), limit, offset)
+
+	query := `
+		SELECT i.id, i.fingerprint, i.original_filename, i.storage_path, i.mime_type,
+		       i.file_size_bytes, i.width, i.height, i.status,
+		       COALESCE(i.media_kind, 'image') AS media_kind, i.duration_ms,
+		       i.user_id, i.guest_session_id,
+		       i.expires_at, i.trashed_at, i.latitude, i.longitude, i.altitude, i.location_source,
+		       i.created_at, i.updated_at
+		FROM images i
+		` + albumJoin + `
+		WHERE i.user_id = $1::uuid
+		  AND (i.expires_at IS NULL OR i.expires_at > NOW())
+		  ` + trashClause + `
+		  ` + albumClause + `
+		  ` + mediaClause + `
+		  ` + scopeClause + `
+		ORDER BY ` + orderBy + `
+		LIMIT ` + limitPlaceholder + ` OFFSET ` + offsetPlaceholder
+
+	rows, err := s.db.QueryContext(ctx, query, queryArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("list user images: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]UserImageBundle, 0)
+	for rows.Next() {
+		img := &model.Image{}
+		var ownerID, guestSessionID, locationSource sql.NullString
+		var expiresAt, trashedAt sql.NullTime
+		var latitude, longitude, altitude sql.NullFloat64
+		var durationMs sql.NullInt64
+		if err := rows.Scan(
+			&img.ID,
+			&img.Fingerprint,
+			&img.OriginalFilename,
+			&img.StoragePath,
+			&img.MimeType,
+			&img.FileSizeBytes,
+			&img.Width,
+			&img.Height,
+			&img.Status,
+			&img.MediaKind,
+			&durationMs,
+			&ownerID,
+			&guestSessionID,
+			&expiresAt,
+			&trashedAt,
+			&latitude,
+			&longitude,
+			&altitude,
+			&locationSource,
+			&img.CreatedAt,
+			&img.UpdatedAt,
+		); err != nil {
+			return nil, 0, fmt.Errorf("scan user image: %w", err)
+		}
+		if img.MediaKind == "" {
+			img.MediaKind = model.MediaKindImage
+		}
+		if durationMs.Valid {
+			d := int(durationMs.Int64)
+			img.DurationMs = &d
+		}
+		if ownerID.Valid {
+			img.UserID = &ownerID.String
+		}
+		if guestSessionID.Valid {
+			img.GuestSessionID = &guestSessionID.String
+		}
+		if expiresAt.Valid {
+			t := expiresAt.Time
+			img.ExpiresAt = &t
+		}
+		if trashedAt.Valid {
+			t := trashedAt.Time
+			img.TrashedAt = &t
+		}
+		if latitude.Valid {
+			v := latitude.Float64
+			img.Latitude = &v
+		}
+		if longitude.Valid {
+			v := longitude.Float64
+			img.Longitude = &v
+		}
+		if altitude.Valid {
+			v := altitude.Float64
+			img.Altitude = &v
+		}
+		if locationSource.Valid {
+			img.LocationSource = &locationSource.String
+		}
+
+		variants, err := s.listVariants(ctx, img.ID)
+		if err != nil {
+			return nil, 0, fmt.Errorf("list variants for %s: %w", img.ID, err)
+		}
+		out = append(out, UserImageBundle{Image: img, Variants: variants})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	return out, total, nil
 }
 
 func (s *ImageService) findByID(ctx context.Context, imageID string) (*model.Image, error) {
@@ -647,6 +1283,27 @@ func (s *ImageService) OpenVariantObject(ctx context.Context, variant *model.Ima
 	if contentType == "" || contentType == "application/octet-stream" {
 		if variant.MimeType != "" {
 			contentType = variant.MimeType
+		}
+	}
+	return body, contentType, nil
+}
+
+// OpenOriginalObject streams the original uploaded object from S3.
+func (s *ImageService) OpenOriginalObject(ctx context.Context, img *model.Image) (io.ReadCloser, string, error) {
+	if s == nil || s.s3 == nil {
+		return nil, "", fmt.Errorf("image service is not initialized")
+	}
+	if img == nil || img.StoragePath == "" {
+		return nil, "", fmt.Errorf("image storage path is required")
+	}
+
+	body, contentType, err := s.s3.GetObject(ctx, img.StoragePath)
+	if err != nil {
+		return nil, "", err
+	}
+	if contentType == "" || contentType == "application/octet-stream" {
+		if img.MimeType != "" {
+			contentType = img.MimeType
 		}
 	}
 	return body, contentType, nil

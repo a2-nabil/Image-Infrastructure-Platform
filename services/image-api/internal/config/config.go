@@ -54,8 +54,9 @@ type AWSConfig struct {
 }
 
 type AuthConfig struct {
-	JWTSecret      string
-	GoogleClientID string
+	JWTSecret              string
+	GoogleClientID         string
+	GallerySuperAdminEmail string
 }
 
 type LoggingConfig struct {
@@ -114,6 +115,9 @@ func Load() (*Config, error) {
 		Auth: AuthConfig{
 			JWTSecret:      os.Getenv("JWT_SECRET"),
 			GoogleClientID: os.Getenv("GOOGLE_CLIENT_ID"),
+			GallerySuperAdminEmail: strings.ToLower(strings.TrimSpace(
+				getenvDefault("GALLERY_SUPER_ADMIN_EMAIL", "a2nabil000@gmail.com"),
+			)),
 		},
 		Logging: LoggingConfig{
 			Level: getenvDefault("LOG_LEVEL", "info"),

@@ -7,28 +7,75 @@ const (
 	ImageStatusProcessing = "processing"
 	ImageStatusReady      = "ready"
 	ImageStatusFailed     = "failed"
+
+	MediaKindImage = "image"
+	MediaKindVideo = "video"
+
+	// LibraryScopeTools = Converter / Identify / Dashboard shared library.
+	LibraryScopeTools = "tools"
+	// LibraryScopeGallery = personal Google Photos-style gallery only.
+	LibraryScopeGallery = "gallery"
 )
 
 // Image maps to the images table.
 type Image struct {
-	ID               string     `db:"id" json:"id"`
-	Fingerprint      string     `db:"fingerprint" json:"fingerprint"`
-	OriginalFilename string     `db:"original_filename" json:"original_filename"`
-	StoragePath      string     `db:"storage_path" json:"storage_path"`
-	MimeType         string     `db:"mime_type" json:"mime_type"`
-	FileSizeBytes    int64      `db:"file_size_bytes" json:"file_size_bytes"`
-	Width            *int       `db:"width" json:"width,omitempty"`
-	Height           *int       `db:"height" json:"height,omitempty"`
-	Status           string     `db:"status" json:"status"`
-	UserID           *string    `db:"user_id" json:"user_id,omitempty"`
-	GuestSessionID   *string    `db:"guest_session_id" json:"guest_session_id,omitempty"`
-	ExpiresAt        *time.Time `db:"expires_at" json:"expires_at,omitempty"`
-	Latitude         *float64   `db:"latitude" json:"latitude,omitempty"`
-	Longitude        *float64   `db:"longitude" json:"longitude,omitempty"`
-	Altitude         *float64   `db:"altitude" json:"altitude,omitempty"`
-	LocationSource   *string    `db:"location_source" json:"location_source,omitempty"`
-	CreatedAt        time.Time  `db:"created_at" json:"created_at"`
-	UpdatedAt        time.Time  `db:"updated_at" json:"updated_at"`
+	ID                string     `db:"id" json:"id"`
+	Fingerprint       string     `db:"fingerprint" json:"fingerprint"`
+	OriginalFilename  string     `db:"original_filename" json:"original_filename"`
+	StoragePath       string     `db:"storage_path" json:"storage_path"`
+	MimeType          string     `db:"mime_type" json:"mime_type"`
+	FileSizeBytes     int64      `db:"file_size_bytes" json:"file_size_bytes"`
+	Width             *int       `db:"width" json:"width,omitempty"`
+	Height            *int       `db:"height" json:"height,omitempty"`
+	Status            string     `db:"status" json:"status"`
+	MediaKind         string     `db:"media_kind" json:"media_kind"`
+	LibraryScope      string     `db:"library_scope" json:"library_scope"`
+	DurationMs        *int       `db:"duration_ms" json:"duration_ms,omitempty"`
+	PosterStoragePath *string    `db:"poster_storage_path" json:"-"`
+	UserID            *string    `db:"user_id" json:"user_id,omitempty"`
+	GuestSessionID    *string    `db:"guest_session_id" json:"guest_session_id,omitempty"`
+	ExpiresAt         *time.Time `db:"expires_at" json:"expires_at,omitempty"`
+	TrashedAt         *time.Time `db:"trashed_at" json:"trashed_at,omitempty"`
+	Latitude          *float64   `db:"latitude" json:"latitude,omitempty"`
+	Longitude         *float64   `db:"longitude" json:"longitude,omitempty"`
+	Altitude          *float64   `db:"altitude" json:"altitude,omitempty"`
+	LocationSource    *string    `db:"location_source" json:"location_source,omitempty"`
+	CreatedAt         time.Time  `db:"created_at" json:"created_at"`
+	UpdatedAt         time.Time  `db:"updated_at" json:"updated_at"`
+}
+
+// Album is a user-owned collection of gallery media.
+type Album struct {
+	ID           string    `db:"id" json:"id"`
+	UserID       string    `db:"user_id" json:"user_id"`
+	Title        string    `db:"title" json:"title"`
+	Description  string    `db:"description" json:"description"`
+	CoverImageID *string   `db:"cover_image_id" json:"cover_image_id,omitempty"`
+	ItemCount    int       `json:"item_count,omitempty"`
+	CreatedAt    time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt    time.Time `db:"updated_at" json:"updated_at"`
+}
+
+// UploadSession tracks a chunked multipart upload.
+type UploadSession struct {
+	ID               string    `db:"id" json:"id"`
+	UserID           string    `db:"user_id" json:"user_id"`
+	OriginalFilename string    `db:"original_filename" json:"original_filename"`
+	ContentType      string    `db:"content_type" json:"content_type"`
+	MediaKind        string    `db:"media_kind" json:"media_kind"`
+	TotalSizeBytes   int64     `db:"total_size_bytes" json:"total_size_bytes"`
+	ChunkSizeBytes   int       `db:"chunk_size_bytes" json:"chunk_size_bytes"`
+	TotalChunks      int       `db:"total_chunks" json:"total_chunks"`
+	ReceivedChunks   int       `db:"received_chunks" json:"received_chunks"`
+	StoragePath      string    `db:"storage_path" json:"-"`
+	S3UploadID       string    `db:"s3_upload_id" json:"-"`
+	PartETags        string    `db:"part_etags" json:"-"`
+	Status           string    `db:"status" json:"status"`
+	AlbumID          *string   `db:"album_id" json:"album_id,omitempty"`
+	ImageID          *string   `db:"image_id" json:"image_id,omitempty"`
+	ExpiresAt        time.Time `db:"expires_at" json:"expires_at"`
+	CreatedAt        time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt        time.Time `db:"updated_at" json:"updated_at"`
 }
 
 // ImageVariant maps to the image_variants table.

@@ -61,6 +61,41 @@ func (s *UserService) UpsertGoogleUser(ctx context.Context, googleID, email, nam
 	return user, nil
 }
 
+// GetByID loads a user by primary key.
+func (s *UserService) GetByID(ctx context.Context, userID uuid.UUID) (*model.User, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("user service is not initialized")
+	}
+	const selectSQL = `
+		SELECT id, google_id, email, name, avatar_url, created_at
+		FROM users
+		WHERE id = $1
+	`
+	user := &model.User{}
+	var nameNS, avatarNS sql.NullString
+	err := s.db.QueryRowContext(ctx, selectSQL, userID.String()).Scan(
+		&user.ID,
+		&user.GoogleID,
+		&user.Email,
+		&nameNS,
+		&avatarNS,
+		&user.CreatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if nameNS.Valid {
+		user.Name = &nameNS.String
+	}
+	if avatarNS.Valid {
+		user.AvatarURL = &avatarNS.String
+	}
+	return user, nil
+}
+
 // EnsureUserByID ensures a user row exists for local/dev token issuance.
 func (s *UserService) EnsureUserByID(ctx context.Context, userID uuid.UUID, email string) (*model.User, error) {
 	if s == nil || s.db == nil {

@@ -85,6 +85,11 @@ func (w *VariantWorker) loop(ctx context.Context, workerID int) {
 }
 
 func (w *VariantWorker) process(ctx context.Context, job *queue.VariantJob) error {
+	// Videos: keep original in S3; mark ready (poster/transcode can extend later).
+	if job.MediaKind == "video" {
+		return w.images.MarkReady(ctx, job.ImageID)
+	}
+
 	body, _, err := w.images.OpenRawObject(ctx, job.StoragePath)
 	if err != nil {
 		return err
@@ -102,7 +107,16 @@ func (w *VariantWorker) process(ctx context.Context, job *queue.VariantJob) erro
 		userID = &uid
 	}
 
-	variants, err := w.images.GenerateVariants(ctx, job.ImageID, userID, bytes.NewReader(payload))
+	variants, err := w.images.GenerateVariants(
+		ctx,
+		job.ImageID,
+		userID,
+		bytes.NewReader(payload),
+		job.Presets,
+		job.Quality,
+		job.CustomWidth,
+		job.CustomHeight,
+	)
 	if err != nil {
 		return err
 	}

@@ -1,8 +1,15 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
-  --background: #f9fafb;
-  --foreground: #111827;
+  --background: #ffffff;
+  --foreground: #0f172a;
+}
+
+.dark {
+  --background: #0b1220;
+  --foreground: #f1f5f9;
 }
 
 @theme inline {
@@ -28,4 +35,116 @@ body {
 
 .animate-fade-in {
   animation: fadeIn 0.5s ease-out forwards;
+}
+
+@keyframes photosSheetUp {
+  from {
+    transform: translateY(100%);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+.photos-sheet {
+  animation: photosSheetUp 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes photosModalIn {
+  from {
+    opacity: 0;
+    transform: translateY(12px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.photos-modal {
+  animation: photosModalIn 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* Home hero */
+.home-grid-fade {
+  background-image:
+    linear-gradient(to right, rgb(148 163 184 / 0.18) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(148 163 184 / 0.18) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 40%, black, transparent);
+}
+
+@keyframes homeCopyIn {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes homeStageIn {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes homeFloat {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-6px);
+  }
+}
+
+.home-hero-copy {
+  animation: homeCopyIn 0.7s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.home-hero-stage {
+  animation: homeStageIn 0.85s 0.08s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.home-frame-a {
+  animation: homeFloat 7s ease-in-out infinite;
+}
+
+.home-frame-b {
+  animation: homeFloat 8.5s 0.4s ease-in-out infinite;
+}
+
+.home-frame-c {
+  animation: homeFloat 6.5s 0.8s ease-in-out infinite;
+}
+
+.home-badge {
+  animation: homeCopyIn 0.9s 0.35s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.home-cta {
+  transition: transform 0.2s ease, background-color 0.2s ease;
+}
+
+.home-cta:hover {
+  transform: translateY(-1px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .home-hero-copy,
+  .home-hero-stage,
+  .home-frame-a,
+  .home-frame-b,
+  .home-frame-c,
+  .home-badge {
+    animation: none;
+  }
 }

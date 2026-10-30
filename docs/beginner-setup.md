@@ -68,26 +68,37 @@ If you cannot find exact check names yet, push a tiny change, wait for Actions, 
 # 1) Start local deps (Docker Desktop must be running)
 docker compose -f infra/docker/docker-compose.yml up -d
 
-# 2) Start API
+# 2) Root .env (never commit real secrets)
+cp .env.example .env
+# Set JWT_SECRET, GOOGLE_CLIENT_ID, optional GALLERY_SUPER_ADMIN_EMAIL / AWS
+
+# 3) Start API
 cd services/image-api
 go run ./cmd/server
 
-# 3) Other terminal: start UI
+# 4) Other terminal: start UI
 cd apps/object-identifier
-npm run dev
+cp .env.local.example .env.local
+# Set NEXT_PUBLIC_GOOGLE_CLIENT_ID, IMAGE_API_ORIGIN, GEMINI_API_KEY
+npm install && npm run dev
 
-# 4) Browser
+# 5) Browser
 # http://localhost:3000
+# Converter / Identify: everyone
+# Dashboard: signed-in tools library
+# Gallery: super admin + allowlisted emails only (⋮ menu)
 
-# 5) After code changes
+# 6) After code changes
 bash scripts/ci-local.sh
 bash scripts/smoke-test.sh
 
-# 6) Save to GitHub
+# 7) Save to GitHub (do not add .env or .env.local)
 git add .
 git commit -m "Describe your change"
 git push
 ```
+
+Security overview: [docs/security.md](security.md).
 
 Then check **Actions** again.
 
@@ -213,6 +224,13 @@ Until those exist, Staging/Production workflows will **build the image** but **s
 - IRSA, Ingress, TLS certificates  
 - Full multi-environment AWS accounts  
 
+## Security habits (do these early)
+
+- Never commit `.env`, `.env.local`, AWS keys, JWT secrets, or Gemini keys  
+- Gallery is private: only the super admin email + allowlist — API returns `403 GALLERY_FORBIDDEN` otherwise  
+- After login, non-allowlisted users still get Converter / Identify / Dashboard — not Gallery  
+- Read [docs/security.md](security.md) before sharing the app with others  
+
 ---
 
 ## Checklist
@@ -222,7 +240,8 @@ Until those exist, Staging/Production workflows will **build the image** but **s
 - [ ] Actions tab shows CI green after push  
 - [ ] Environments `staging` and `production` created  
 - [ ] Local: Docker + API + UI still work  
-- [ ] Use `bash scripts/ci-local.sh` (no `make` needed on Windows)
+- [ ] Use `bash scripts/ci-local.sh` (no `make` needed on Windows)  
+- [ ] Confirmed `.env` / `.env.local` are gitignored and not staged
 
 **Later**
 

@@ -159,6 +159,128 @@ func (c *S3Client) PresignGetURL(ctx context.Context, key string, ttl time.Durat
 	return out.URL, nil
 }
 
+// CreateMultipartUpload starts an S3 multipart upload and returns the upload ID.
+func (c *S3Client) CreateMultipartUpload(ctx context.Context, key, contentType string) (string, error) {
+	if c == nil || c.client == nil {
+		return "", fmt.Errorf("s3 client is not initialized")
+	}
+	if key == "" {
+		return "", fmt.Errorf("object key is required")
+	}
+	if c.bucket == "" {
+		return "", fmt.Errorf("s3 bucket is not configured")
+	}
+	input := &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(key),
+	}
+	if contentType != "" {
+		input.ContentType = aws.String(contentType)
+	}
+	out, err := c.client.CreateMultipartUpload(ctx, input)
+	if err != nil {
+		return "", fmt.Errorf("create multipart upload %q: %w", key, err)
+	}
+	if out.UploadId == nil || *out.UploadId == "" {
+		return "", fmt.Errorf("create multipart upload returned empty upload id")
+	}
+	return *out.UploadId, nil
+}
+
+// UploadPart uploads one multipart part and returns its ETag.
+func (c *S3Client) UploadPart(
+	ctx context.Context,
+	key, uploadID string,
+	partNumber int32,
+	body io.Reader,
+	size int64,
+) (string, error) {
+	if c == nil || c.client == nil {
+		return "", fmt.Errorf("s3 client is not initialized")
+	}
+	if key == "" || uploadID == "" {
+		return "", fmt.Errorf("key and upload id are required")
+	}
+	if partNumber < 1 {
+		return "", fmt.Errorf("part number must be >= 1")
+	}
+	if c.bucket == "" {
+		return "", fmt.Errorf("s3 bucket is not configured")
+	}
+	out, err := c.client.UploadPart(ctx, &s3.UploadPartInput{
+		Bucket:        aws.String(c.bucket),
+		Key:           aws.String(key),
+		UploadId:      aws.String(uploadID),
+		PartNumber:    aws.Int32(partNumber),
+		Body:          body,
+		ContentLength: aws.Int64(size),
+	})
+	if err != nil {
+		return "", fmt.Errorf("upload part %d for %q: %w", partNumber, key, err)
+	}
+	if out.ETag == nil || *out.ETag == "" {
+		return "", fmt.Errorf("upload part returned empty etag")
+	}
+	return *out.ETag, nil
+}
+
+// CompleteMultipartUpload finishes a multipart upload.
+func (c *S3Client) CompleteMultipartUpload(
+	ctx context.Context,
+	key, uploadID string,
+	parts []types.CompletedPart,
+) error {
+	if c == nil || c.client == nil {
+		return fmt.Errorf("s3 client is not initialized")
+	}
+	if key == "" || uploadID == "" {
+		return fmt.Errorf("key and upload id are required")
+	}
+	if len(parts) == 0 {
+		return fmt.Errorf("at least one part is required")
+	}
+	if c.bucket == "" {
+		return fmt.Errorf("s3 bucket is not configured")
+	}
+	_, err := c.client.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(c.bucket),
+		Key:      aws.String(key),
+		UploadId: aws.String(uploadID),
+		MultipartUpload: &types.CompletedMultipartUpload{
+			Parts: parts,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("complete multipart upload %q: %w", key, err)
+	}
+	return nil
+}
+
+// AbortMultipartUpload cancels an in-progress multipart upload.
+func (c *S3Client) AbortMultipartUpload(ctx context.Context, key, uploadID string) error {
+	if c == nil || c.client == nil {
+		return fmt.Errorf("s3 client is not initialized")
+	}
+	if key == "" || uploadID == "" {
+		return fmt.Errorf("key and upload id are required")
+	}
+	if c.bucket == "" {
+		return fmt.Errorf("s3 bucket is not configured")
+	}
+	_, err := c.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(c.bucket),
+		Key:      aws.String(key),
+		UploadId: aws.String(uploadID),
+	})
+	if err != nil {
+		if isS3NotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("abort multipart upload %q: %w", key, err)
+	}
+	return nil
+}
+
 // DeleteObject removes an object from the configured bucket.
 // Missing keys are treated as success so cleanup is idempotent.
 func (c *S3Client) DeleteObject(ctx context.Context, key string) error {

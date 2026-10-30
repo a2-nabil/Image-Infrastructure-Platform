@@ -18,7 +18,10 @@ const (
 	guestSessionIDKey authContextKey = "guest_session_id"
 )
 
-const guestSessionHeader = "X-Guest-Session-ID"
+const (
+	guestSessionHeader = "X-Guest-Session-ID"
+	GuestSessionCookie = "guest_session_id"
+)
 
 // OptionalAuthMiddleware extracts optional JWT user identity and guest session id.
 func OptionalAuthMiddleware(jwtSecret string) func(http.Handler) http.Handler {
@@ -35,7 +38,13 @@ func OptionalAuthMiddleware(jwtSecret string) func(http.Handler) http.Handler {
 				}
 			}
 
-			if guestID := strings.TrimSpace(r.Header.Get(guestSessionHeader)); guestID != "" {
+			guestID := strings.TrimSpace(r.Header.Get(guestSessionHeader))
+			if guestID == "" {
+				if c, err := r.Cookie(GuestSessionCookie); err == nil {
+					guestID = strings.TrimSpace(c.Value)
+				}
+			}
+			if guestID != "" {
 				ctx = context.WithValue(ctx, guestSessionIDKey, guestID)
 			}
 
@@ -61,6 +70,70 @@ func RequireAuth(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// GalleryAccessChecker decides whether an authenticated user may use gallery APIs.
+type GalleryAccessChecker interface {
+	UserMayAccessGallery(ctx context.Context, userID uuid.UUID) (allowed bool, err error)
+}
+
+// RequireGalleryAccess requires auth and gallery allowlist (or super admin).
+func RequireGalleryAccess(checker GalleryAccessChecker) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			userID := GetUserID(r.Context())
+			if userID == nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": false,
+					"error": map[string]string{
+						"code":    "UNAUTHORIZED",
+						"message": "authentication required",
+					},
+				})
+				return
+			}
+			if checker == nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": false,
+					"error": map[string]string{
+						"code":    "GALLERY_FORBIDDEN",
+						"message": "gallery access is not configured",
+					},
+				})
+				return
+			}
+			ok, err := checker.UserMayAccessGallery(r.Context(), *userID)
+			if err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": false,
+					"error": map[string]string{
+						"code":    "GALLERY_ACCESS_CHECK_FAILED",
+						"message": "failed to verify gallery access",
+					},
+				})
+				return
+			}
+			if !ok {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				_ = json.NewEncoder(w).Encode(map[string]any{
+					"success": false,
+					"error": map[string]string{
+						"code":    "GALLERY_FORBIDDEN",
+						"message": "gallery access denied",
+					},
+				})
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // GetUserID returns the authenticated user UUID from context, if present.

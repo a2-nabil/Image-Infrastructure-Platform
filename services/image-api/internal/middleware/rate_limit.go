@@ -24,6 +24,22 @@ return {current, ttl}
 
 // RateLimitMiddleware enforces a fixed-window per-IP limit using Redis.
 func RateLimitMiddleware(rdb *redis.Client, limit int, window time.Duration, bucketName string) func(http.Handler) http.Handler {
+	return rateLimitMiddleware(rdb, limit, window, bucketName, false)
+}
+
+// RateLimitUserMiddleware enforces a fixed-window per authenticated user limit.
+// Prefer this for gallery/bulk upload APIs so shared NATs do not throttle a whole office.
+func RateLimitUserMiddleware(rdb *redis.Client, limit int, window time.Duration, bucketName string) func(http.Handler) http.Handler {
+	return rateLimitMiddleware(rdb, limit, window, bucketName, true)
+}
+
+func rateLimitMiddleware(
+	rdb *redis.Client,
+	limit int,
+	window time.Duration,
+	bucketName string,
+	byUser bool,
+) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if rdb == nil {
@@ -31,8 +47,16 @@ func RateLimitMiddleware(rdb *redis.Client, limit int, window time.Duration, buc
 				return
 			}
 
-			ip := clientIP(r)
-			key := fmt.Sprintf("ratelimit:%s:%s", bucketName, ip)
+			subject := clientIP(r)
+			if byUser {
+				if uid := GetUserID(r.Context()); uid != nil {
+					subject = "user:" + uid.String()
+				} else {
+					writeJSONUnauthorized(w)
+					return
+				}
+			}
+			key := fmt.Sprintf("ratelimit:%s:%s", bucketName, subject)
 			windowSeconds := int64(window.Seconds())
 			if windowSeconds < 1 {
 				windowSeconds = 1
@@ -77,6 +101,18 @@ func RateLimitMiddleware(rdb *redis.Client, limit int, window time.Duration, buc
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+func writeJSONUnauthorized(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusUnauthorized)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"success": false,
+		"error": map[string]string{
+			"code":    "UNAUTHORIZED",
+			"message": "authentication required",
+		},
+	})
 }
 
 func clientIP(r *http.Request) string {

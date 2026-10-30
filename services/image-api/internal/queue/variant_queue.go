@@ -13,10 +13,15 @@ const VariantQueueKey = "image-api:queue:variant-jobs"
 
 // VariantJob is an event published after raw upload for async processing.
 type VariantJob struct {
-	ImageID     string `json:"image_id"`
-	StoragePath string `json:"storage_path"`
-	UserID      string `json:"user_id,omitempty"`
-	EnqueuedAt  string `json:"enqueued_at"`
+	ImageID      string   `json:"image_id"`
+	StoragePath  string   `json:"storage_path"`
+	UserID       string   `json:"user_id,omitempty"`
+	MediaKind    string   `json:"media_kind,omitempty"`
+	Presets      []string `json:"presets,omitempty"`
+	Quality      int      `json:"quality,omitempty"`
+	CustomWidth  int      `json:"custom_width,omitempty"`
+	CustomHeight int      `json:"custom_height,omitempty"`
+	EnqueuedAt   string   `json:"enqueued_at"`
 }
 
 // VariantQueue is a Redis list-backed job queue (event-driven worker pattern).

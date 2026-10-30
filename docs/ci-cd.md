@@ -1,5 +1,7 @@
 # CI/CD, security gates, and environments
 
+Application security (ownership, gallery allowlist, guest claim): **[docs/security.md](security.md)**.
+
 Pipeline stages for this repository (GitHub Actions):
 
 ```
@@ -15,6 +17,12 @@ pre-commit → CI → CodeQL + SAST → Staging → DAST → Production
 | Staging | `.github/workflows/staging.yml` | Build/push GHCR image, optional kubectl apply |
 | DAST | `.github/workflows/dast.yml` | OWASP ZAP baseline against staging URL |
 | Production (must) | `.github/workflows/production.yml` | Tag/`workflow_dispatch` + Environment approval + preflight |
+
+Runtime gates that CI cannot fully replace:
+
+- Gallery routes require `RequireGalleryAccess` (super admin + `gallery_access_emails`)
+- Tools vs gallery isolation via `library_scope`
+- Staging/prod: `JWT_SECRET`, `CORS_ALLOWED_ORIGINS`, `POSTGRES_SSLMODE=require`
 
 ## Install pre-commit hooks
 

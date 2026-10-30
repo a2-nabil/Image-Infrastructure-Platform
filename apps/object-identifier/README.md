@@ -1,59 +1,75 @@
-# Object Identifier
+# Object Identifier (Next.js)
 
-Next.js frontend for the [Image Infrastructure Platform](../../README.md).
+Frontend for the Image Infrastructure Platform: Converter, Identify, Dashboard (tools library), and personal Gallery (allowlist).
 
-Runs **upload** (Go Image API) and **identify** (Gemini via `POST /api/identify`) in parallel so the UI can show whichever response finishes first. After upload returns `processing`, the app polls `GET /api/v1/images/{id}` until async workers produce WebP variants.
+## Stack
 
-## What this app needs
+- Next.js 16 (App Router) + React 19 + TypeScript
+- Tailwind CSS (light / dark via `ThemeProvider`, `html.dark`, `a2n-theme`)
+- Google Identity Services → API JWT
+- Proxies `/api/v1/*` to the Go API (`IMAGE_API_ORIGIN`)
 
-| Dependency | Required for | Default |
-|------------|--------------|---------|
-| Image API (`:8080`) | Variants, dedupe, storage metadata | `http://localhost:8080/api/v1` |
-| Postgres + Redis | Image API itself | via root Docker Compose |
-| AWS S3 | Persisting originals/variants | from root `.env` |
-| `GEMINI_API_KEY` | Object identification | set in `.env.local` |
+## Routes
 
-Without the Image API, the UI still runs identify (upload is mocked and an amber note appears). Without `GEMINI_API_KEY`, identify returns `MISSING_API_KEY`.
+| Path | Notes |
+|------|--------|
+| `/` | Landing |
+| `/converter` | Format conversion (guest or signed-in) |
+| `/identify` | Gemini identification UI |
+| `/dashboard` | Signed-in **tools** library only |
+| `/gallery` | Personal Gallery — **allowlist only** (super admin + granted emails) |
+| `/login` | Google sign-in |
 
-## Environment
+Gallery is **not** in the primary nav. Super admin / allowlisted users open it from the header ⋮ menu. Profile / brand links go to **Dashboard**, not Gallery.
+
+## Gallery UX
+
+- Google Photos–style grid, albums, trash, select mode
+- Actions (upload, album, trash, access, theme) in the ⋮ menu
+- Full-page drag-and-drop upload
+- Process-wide upload queue (`gallery-upload-queue` + `GalleryUploadHost` in root layout) so uploads survive route changes
+- Chunked multipart upload with XHR byte progress; concurrent chunks; completion retry
+- Overlays: `PhotosSheet` (bottom sheet &lt; `md`, centered modal `md+`) — see workspace UI rules
+
+## Security (frontend)
+
+- Gallery links and Access UI only when `hasGalleryAccess` (email === super admin or server allowlist).
+- All gallery mutations go through authenticated API helpers; **backend** returns `403 GALLERY_FORBIDDEN` if not allowed — never rely on UI alone.
+- Session / gallery caches keyed by user + library kind (`tools` \| `gallery`); cleared on logout / account switch.
+- Soft-revalidate does not keep a previous user’s rows when the new list `total` is 0.
+- Guest session id is rotated after successful claim; claim body must match bound guest header (enforced by API).
+
+See [docs/security.md](../../docs/security.md).
+
+## Local setup
 
 ```bash
 cp .env.local.example .env.local
-```
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `GEMINI_API_KEY` | Yes (for identify) | Google Gemini API key |
-| `NEXT_PUBLIC_IMAGE_API_URL` | No | Defaults to same-origin `/api/v1` (Netlify/`next.config` rewrite) |
-
-## Run (frontend only)
-
-```bash
+# Set NEXT_PUBLIC_GOOGLE_CLIENT_ID, IMAGE_API_ORIGIN, GEMINI_API_KEY
 npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+| Variable | Purpose |
+|----------|---------|
+| `NEXT_PUBLIC_IMAGE_API_URL` | Usually `/api/v1` (same-origin proxy) |
+| `IMAGE_API_ORIGIN` | Go API origin (e.g. `http://localhost:8080`) |
+| `NEXT_PUBLIC_GOOGLE_CLIENT_ID` | Google OAuth web client (public) |
+| `GEMINI_API_KEY` | Server-only; used by `/api/identify` |
 
-Upload limits in the UI: JPEG / PNG / WebP, max **4 MB**.
+Never put JWT secrets, AWS keys, or Gemini keys in `NEXT_PUBLIC_*` — Gemini stays on the Next server route; JWT/AWS stay on the API / root `.env`.
 
-## Full local stack
-
-From the **repo root** (Docker Desktop must be running):
-
-```bash
-cp .env.example .env          # fill AWS keys + keep Postgres defaults
-docker compose -f infra/docker/docker-compose.yml up -d
-
-cd services/image-api && go run ./cmd/server
-# in another terminal:
-cd apps/object-identifier && npm run dev
-```
-
-Then open http://localhost:3000 and upload an image, or run:
+## Scripts
 
 ```bash
-bash scripts/smoke-test.sh
+npm run dev
+npm run build
+npm run start
+npm run lint
 ```
 
-See the root [README](../../README.md) for architecture, API surface, curl examples, and troubleshooting.
+## Related
+
+- Root [README](../../README.md)
+- [API contract](../../docs/api/v1-contract.md)
+- [Security](../../docs/security.md)

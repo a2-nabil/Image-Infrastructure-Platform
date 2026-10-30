@@ -75,6 +75,16 @@ deny_code="$(curl -s -o /dev/null -w "%{http_code}" "$API_BASE/api/v1/images/${I
 echo "  unauthenticated GET -> HTTP $deny_code"
 [[ "$deny_code" == "403" ]] || { echo "FAIL: expected 403 without ownership"; exit 1; }
 
+SIGNED_PATH="$(node -e "const fs=require('fs');const j=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); const v=(j.data.variants||[]).find(x=>x.preset_name==='small'); if(!v||!v.url) process.exit(2); const u=new URL(v.url, process.argv[2]); process.stdout.write(u.pathname+u.search)" "$tmpdir/image.json" "$API_BASE" || true)"
+if [[ -n "$SIGNED_PATH" && "$SIGNED_PATH" == *sig=* ]]; then
+  echo "==> signed variant URL without guest header"
+  code="$(curl -s -o "$tmpdir/signed-small.webp" -w "%{http_code}" "$API_BASE${SIGNED_PATH}")"
+  echo "  signed small -> HTTP $code"
+  [[ "$code" == "200" ]] || { echo "FAIL: signed variant URL"; exit 1; }
+else
+  echo "==> signed variant URL skipped (JWT_SECRET unset or no variants yet)"
+fi
+
 echo "==> variants"
 for preset in thumbnail small medium; do
   out="$tmpdir/${preset}.webp"
