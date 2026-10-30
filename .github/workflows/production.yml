@@ -49,7 +49,7 @@ jobs:
             exit 1
           fi
           echo "== Dockerfile non-root =="
-          grep -q 'USER appuser' services/image-api/Dockerfile
+          grep -q 'USER appuser' services/api/Dockerfile
           echo "Preflight OK"
 
   security-gates:

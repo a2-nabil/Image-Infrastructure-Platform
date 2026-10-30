@@ -117,7 +117,7 @@ if [[ "$code" != "000" ]]; then
   if grep -q '"success":true' "$tmpdir/identify.json" 2>/dev/null; then
     echo "identify OK"
   elif grep -q 'MISSING_API_KEY' "$tmpdir/identify.json" 2>/dev/null; then
-    echo "WARN: GEMINI_API_KEY not set in apps/object-identifier/.env.local"
+    echo "WARN: GEMINI_API_KEY not set in apps/web/.env.local"
   else
     echo "WARN: identify did not succeed (frontend may be down or Gemini error)"
   fi

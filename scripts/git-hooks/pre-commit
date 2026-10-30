@@ -58,12 +58,12 @@ if git diff --cached --name-only --diff-filter=ACM | grep -E '\.(env|pem|key)$' 
   exit 1
 fi
 
-STAGED_GO="$(git diff --cached --name-only --diff-filter=ACM | grep '^services/image-api/.*\.go$' || true)"
+STAGED_GO="$(git diff --cached --name-only --diff-filter=ACM | grep '^services/api/.*\.go$' || true)"
 if [[ -n "$STAGED_GO" ]]; then
   echo "[pre-commit] gofmt + go vet..."
   (
-    cd services/image-api
-    files="$(echo "$STAGED_GO" | sed 's|^services/image-api/||')"
+    cd services/api
+    files="$(echo "$STAGED_GO" | sed 's|^services/api/||')"
     # shellcheck disable=SC2086
     unformatted="$(gofmt -l $files)"
     if [[ -n "$unformatted" ]]; then
@@ -75,10 +75,10 @@ if [[ -n "$STAGED_GO" ]]; then
   )
 fi
 
-STAGED_FE="$(git diff --cached --name-only --diff-filter=ACM | grep '^apps/object-identifier/.*\.\(ts\|tsx\|js\|jsx\|mjs\)$' || true)"
+STAGED_FE="$(git diff --cached --name-only --diff-filter=ACM | grep '^apps/web/.*\.\(ts\|tsx\|js\|jsx\|mjs\)$' || true)"
 if [[ -n "$STAGED_FE" ]]; then
   echo "[pre-commit] frontend lint..."
-  (cd apps/object-identifier && npm run lint)
+  (cd apps/web && npm run lint)
 fi
 
 echo "[pre-commit] ok"

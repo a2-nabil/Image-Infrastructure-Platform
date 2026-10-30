@@ -1,6 +1,6 @@
 # Image API v1 Contract
 
-Baseline HTTP contract for `services/image-api`. All JSON success envelopes use `{ "success": true, "data": ... }`. Errors use `{ "success": false, "error": { "code", "message" } }`.
+Baseline HTTP contract for `services/api`. All JSON success envelopes use `{ "success": true, "data": ... }`. Errors use `{ "success": false, "error": { "code", "message" } }`.
 
 Security model: [docs/security.md](../security.md).
 

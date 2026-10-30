@@ -4,8 +4,8 @@ Production-shaped practice stack for image upload, processing, AI identification
 
 | Layer | Stack |
 |-------|--------|
-| API | Go (`services/image-api`) — JWT auth, ownership, gallery allowlist, S3, Postgres, Redis |
-| Web | Next.js 16 (`apps/object-identifier`) — Converter, Identify, Dashboard, Gallery |
+| API | Go (`services/api`) — JWT auth, ownership, gallery allowlist, S3, Postgres, Redis |
+| Web | Next.js 16 (`apps/web`) — Converter, Identify, Dashboard, Gallery |
 | Data | Postgres (metadata), Redis (rate limits / queues), S3 (objects) |
 | AI | Google Gemini (optional) for object identification |
 
@@ -35,16 +35,17 @@ Full detail: **[docs/security.md](docs/security.md)**.
 
 ```text
 apps/
-  object-identifier/   Next.js app (Google OAuth, Converter, Identify, Dashboard, Gallery)
+  web/                 Next.js product UI (Converter, Identify, Dashboard, Gallery, …)
 services/
-  image-api/           Go API (JWT, S3, Postgres, Redis, gallery allowlist)
-  image-worker/        Optional worker process notes / helpers
+  api/                 Go HTTP API (JWT, S3, Postgres, Redis, gallery allowlist)
+  worker/              Reserved for future background workers
 docs/
   security.md          Auth, ownership, gallery isolation
+  deploy.md            Render, Netlify, VPS / Docker, Kubernetes
   api/v1-contract.md   HTTP contract
   beginner-setup.md    Local setup
   ci-cd.md             Pipeline
-infra/                 Docker Compose, Terraform sketches, k8s notes
+infra/                 Docker Compose, Terraform sketches
 deploy/k8s/            Kubernetes manifests
 .github/workflows/     CI / CD / security scans
 ```
@@ -59,10 +60,10 @@ docker compose -f infra/docker/docker-compose.yml up -d
 
 # API — copy env, then run
 cp .env.example .env          # edit JWT_SECRET, CORS, GALLERY_SUPER_ADMIN_EMAIL, optional AWS
-cd services/image-api && go run ./cmd/server
+cd services/api && go run ./cmd/server
 
 # Web (second terminal)
-cd apps/object-identifier
+cd apps/web
 cp .env.local.example .env.local   # Google client id + IMAGE_API_ORIGIN / GEMINI_API_KEY
 npm install && npm run dev
 ```
@@ -79,7 +80,7 @@ Without real AWS credentials the API uses an **in-memory S3 stub** (fine for UI/
 
 1. Create an OAuth Web client in Google Cloud Console.
 2. Authorized JavaScript origins: `http://localhost:3000` (and your deployed origin).
-3. Set `NEXT_PUBLIC_GOOGLE_CLIENT_ID` in `apps/object-identifier/.env.local`.
+3. Set `NEXT_PUBLIC_GOOGLE_CLIENT_ID` in `apps/web/.env.local`.
 4. API verifies the Google ID token and issues a JWT (`JWT_SECRET` in root `.env`).
 
 ### Gallery access
@@ -129,11 +130,12 @@ CI also runs gitleaks, CodeQL, GoSec/Semgrep, npm audit, and staging DAST. See [
 | Doc | Topic |
 |-----|--------|
 | [docs/security.md](docs/security.md) | Ownership, gallery, guest claim, ops |
+| [docs/deploy.md](docs/deploy.md) | Render, Netlify, Vercel, VPS/Docker, K8s |
 | [docs/api/v1-contract.md](docs/api/v1-contract.md) | Request/response shapes |
 | [docs/beginner-setup.md](docs/beginner-setup.md) | First-time setup |
 | [docs/ci-cd.md](docs/ci-cd.md) | Pipelines |
 | [docs/personal-interview-banglish.md](docs/personal-interview-banglish.md) | Interview talking points |
-| [apps/object-identifier/README.md](apps/object-identifier/README.md) | Frontend notes |
+| [apps/web/README.md](apps/web/README.md) | Frontend notes |
 
 ## Disclaimer
 

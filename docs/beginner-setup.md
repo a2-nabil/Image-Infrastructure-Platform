@@ -17,9 +17,11 @@ You do **not** need Kubernetes to keep developing locally.
 Your laptop (now)          GitHub (next)              Kubernetes (later)
 ─────────────────          ──────────────             ──────────────────
 Docker Postgres/Redis  →   Actions: CI/CodeQL/SAST →  Staging / Production
-Go API :8080               Builds Docker image        Runs image-api pods
-Next.js :3000
+Go API :8080 (`services/api`)  Builds Docker image   Runs API pods
+Next.js :3000 (`apps/web`)
 ```
+
+Cloud deploy (Render + Netlify, VPS, K8s): **[docs/deploy.md](deploy.md)**.
 
 ---
 
@@ -57,8 +59,8 @@ You can leave secrets empty for now.
    - Require status checks to pass  
 4. After at least one successful Actions run, add required checks such as:  
    - `Secret scan (gitleaks)`  
-   - `Image API (Go)`  
-   - `Object Identifier (Next.js)`  
+   - `API (Go)`  
+   - `Web (Next.js)`  
 
 If you cannot find exact check names yet, push a tiny change, wait for Actions, then pick from the list GitHub shows.
 
@@ -73,11 +75,11 @@ cp .env.example .env
 # Set JWT_SECRET, GOOGLE_CLIENT_ID, optional GALLERY_SUPER_ADMIN_EMAIL / AWS
 
 # 3) Start API
-cd services/image-api
+cd services/api
 go run ./cmd/server
 
 # 4) Other terminal: start UI
-cd apps/object-identifier
+cd apps/web
 cp .env.local.example .env.local
 # Set NEXT_PUBLIC_GOOGLE_CLIENT_ID, IMAGE_API_ORIGIN, GEMINI_API_KEY
 npm install && npm run dev
@@ -152,7 +154,7 @@ If `kubectl` fails, install: https://kubernetes.io/docs/tasks/tools/
 ### C2. Build the API image locally
 
 ```bash
-cd services/image-api
+cd services/api
 docker build -t image-api:local .
 ```
 

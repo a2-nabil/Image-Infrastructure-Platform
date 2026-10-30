@@ -33,8 +33,8 @@ jobs:
       - if: matrix.language == 'go'
         uses: actions/setup-go@v5
         with:
-          go-version-file: services/image-api/go.mod
-          cache-dependency-path: services/image-api/go.sum
+          go-version-file: services/api/go.mod
+          cache-dependency-path: services/api/go.sum
       - uses: github/codeql-action/init@v3
         with:
           languages: ${{ matrix.language }}
@@ -42,7 +42,7 @@ jobs:
           queries: security-extended,security-and-quality
       - if: matrix.language == 'go'
         name: Build Go for CodeQL
-        working-directory: services/image-api
+        working-directory: services/api
         run: go build ./cmd/server
       - uses: github/codeql-action/analyze@v3
         with:

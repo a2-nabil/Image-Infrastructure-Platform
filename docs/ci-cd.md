@@ -43,10 +43,10 @@ bash scripts/install-hooks.sh
 Require status checks before merge:
 
 - `Secret scan (gitleaks)`
-- `Image API (Go)`
-- `Object Identifier (Next.js)`
+- `API (Go)`
+- `Web (Next.js)`
 - `Analyze (go)` / `Analyze (javascript-typescript)` (CodeQL)
-- `GoSec (image-api)` / `Semgrep` (SAST)
+- `GoSec (api)` / `Semgrep` (SAST)
 
 ### Environments
 

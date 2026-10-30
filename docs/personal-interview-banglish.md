@@ -84,8 +84,8 @@ Browser (Next.js :3000)
 
 | Path | Role |
 |------|------|
-| `apps/object-identifier/` | Next.js frontend |
-| `services/image-api/` | Go backend API |
+| `apps/web/` | Next.js frontend |
+| `services/api/` | Go backend API |
 | `infra/docker/` | Local Postgres + Redis |
 | `deploy/k8s/` | Kubernetes manifests |
 | `docs/security.md` | Ownership + gallery security |
@@ -108,7 +108,7 @@ Browser (Next.js :3000)
 ## 6) Backend structure
 
 ```
-services/image-api/
+services/api/
   cmd/server/main.go
   internal/handler/     image, user, gallery, gallery_access, identify, auth
   internal/service/     image, album, gallery_upload, gallery_access, access_token
@@ -127,7 +127,7 @@ services/image-api/
 ## 7) Frontend structure
 
 ```
-apps/object-identifier/src/
+apps/web/src/
   app/converter|identify|dashboard|gallery/
   components/SiteHeader, PhotosSheet, GalleryUploadHost, ThemeProvider, AuthProvider
   lib/gallery-api, gallery-upload-queue, gallery-cache, user-api, auth
@@ -170,8 +170,8 @@ Local: `bash scripts/ci-local.sh`, `bash scripts/smoke-test.sh`.
 ```bash
 docker compose -f infra/docker/docker-compose.yml up -d
 cp .env.example .env   # JWT_SECRET, GOOGLE_CLIENT_ID, GALLERY_SUPER_ADMIN_EMAIL
-cd services/image-api && go run ./cmd/server
-cd apps/object-identifier && cp .env.local.example .env.local && npm run dev
+cd services/api && go run ./cmd/server
+cd apps/web && cp .env.local.example .env.local && npm run dev
 # http://localhost:3000
 ```
 

@@ -4,7 +4,7 @@ export
 endif
 
 MIGRATE_DATABASE_URL=postgres://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):$(POSTGRES_PORT)/$(POSTGRES_DB)?sslmode=$(POSTGRES_SSLMODE)
-MIGRATE_PATH=services/image-api/migrations
+MIGRATE_PATH=services/api/migrations
 
 .PHONY: migrate-up migrate-down install-hooks test ci-local smoke fmt
 
@@ -24,11 +24,11 @@ install-hooks:
 	bash scripts/install-hooks.sh
 
 test:
-	cd services/image-api && go test ./... -count=1
-	cd apps/object-identifier && npm run lint
+	cd services/api && go test ./... -count=1
+	cd apps/web && npm run lint
 
 fmt:
-	cd services/image-api && gofmt -w .
+	cd services/api && gofmt -w .
 
 ci-local:
 	bash scripts/ci-local.sh

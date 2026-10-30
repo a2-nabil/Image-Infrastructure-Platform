@@ -24,22 +24,22 @@ repos:
   - repo: local
     hooks:
       - id: go-fmt
-        name: go fmt (image-api)
-        entry: bash -c 'cd services/image-api && test -z "$(gofmt -l .)" || (echo "gofmt needed:" && gofmt -l . && exit 1)'
+        name: go fmt (api)
+        entry: bash -c 'cd services/api && test -z "$(gofmt -l .)" || (echo "gofmt needed:" && gofmt -l . && exit 1)'
         language: system
-        files: ^services/image-api/.*\.go$
+        files: ^services/api/.*\.go$
         pass_filenames: false
 
       - id: go-vet
-        name: go vet (image-api)
-        entry: bash -c 'cd services/image-api && go vet ./...'
+        name: go vet (api)
+        entry: bash -c 'cd services/api && go vet ./...'
         language: system
-        files: ^services/image-api/.*\.go$
+        files: ^services/api/.*\.go$
         pass_filenames: false
 
       - id: frontend-lint
-        name: eslint (object-identifier)
-        entry: bash -c 'cd apps/object-identifier && npm run lint'
+        name: eslint (web)
+        entry: bash -c 'cd apps/web && npm run lint'
         language: system
-        files: ^apps/object-identifier/.*\.(ts|tsx|js|jsx|mjs)$
+        files: ^apps/web/.*\.(ts|tsx|js|jsx|mjs)$
         pass_filenames: false
